@@ -681,26 +681,11 @@
            sheet is collapsed. Drag up for the full form/list/controls. -->
       {#if trips.length > 0}
         <div class="route-card">
-          <div class="card-stats">
-            <div class="card-stat">
-              <span class="card-stat-label">Viajes</span>
-              <span class="card-stat-value">{trips.length}</span>
-            </div>
-            <div class="card-stat">
-              <span class="card-stat-label">Distancia</span>
-              <span class="card-stat-value">{fmtKm(totalDistanceKm)}</span>
-            </div>
-            <div class="card-stat">
-              <span class="card-stat-label">Combustible</span>
-              <span class="card-stat-value">{fmtL(totalLitres)}</span>
-            </div>
+          <p class="card-route">{trips.length} viaje{trips.length !== 1 ? 's' : ''} · {fmtKm(totalDistanceKm)}</p>
+          <div class="card-fuel">
+            <span class="card-fuel-value">{fmtL(totalLitres)}</span>
+            <span class="card-fuel-label">· {fmtCLP(totalCost)}</span>
           </div>
-
-          <div class="card-total">
-            <span class="card-total-label">Gasto total</span>
-            <span class="card-total-value">{fmtCLP(totalCost)}</span>
-          </div>
-
           <button class="card-play" onclick={vizState === 'playing' ? pauseViz : playViz}>
             {#if vizState === 'playing'}
               ⏸ Pausar
@@ -1064,18 +1049,15 @@
   .hud-cost-val { font-size: 1.5rem; font-weight: 800; line-height: 1.1; font-family: 'SF Mono','Fira Code',monospace; color: #818cf8; }
   .hud-cost-total { font-size: .6875rem; color: #475569; }
 
-  /* ── Mobile ────────────────────────────────────────────────────────────── */
+  /* ── Mobile (iPhone 16 Pro: 402px, Pro Max: 440px) ───────────────────── */
   @media (max-width: 768px) {
     header { display: none; }
 
     .body { position: relative; }
 
-    .map-wrap {
-      position: absolute;
-      inset: 0;
-    }
+    .map-wrap { position: absolute; inset: 0; }
 
-    /* Panel becomes a bottom sheet floating over the map. */
+    /* ── Bottom sheet ─────────────────────────────────────── */
     .panel {
       position: absolute;
       left: 0; right: 0; bottom: 0;
@@ -1083,24 +1065,25 @@
       border-right: none;
       border-top: 1px solid var(--border);
       border-radius: 1rem 1rem 0 0;
-      box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.14);
       overflow: hidden;
-      transition: height 0.28s ease, background 0.2s, border-color 0.2s;
+      transition: height 0.25s ease, background 0.2s, border-color 0.2s;
       z-index: 10;
       overscroll-behavior: contain;
     }
-    .panel[data-state="hidden"]  { height: 44px; }
-    .panel[data-state="compact"] { height: 300px; }
-    .panel[data-state="full"]    { height: 82vh; overflow-y: auto; }
-    .panel.dragging { transition: none; }
+    .panel[data-state="hidden"]  { height: 36px; }
+    .panel[data-state="compact"] { height: auto; max-height: 240px; }
+    .panel[data-state="full"]    { height: 80vh; overflow-y: auto; }
+    .panel.dragging { transition: none; overflow: hidden; }
 
+    /* Drag handle */
     .sheet-handle {
       display: flex;
       justify-content: center;
       align-items: center;
       width: 100%;
-      min-height: 32px;
-      padding: 0.75rem 0 0.5rem;
+      min-height: 28px;
+      padding: 0.625rem 0 0.375rem;
       background: var(--surface);
       border: none;
       cursor: grab;
@@ -1114,62 +1097,44 @@
     }
     .sheet-handle:active { cursor: grabbing; }
     .handle-bar {
-      width: 44px;
-      height: 5px;
-      border-radius: 3px;
+      width: 36px;
+      height: 4px;
+      border-radius: 2px;
       background: var(--border);
     }
 
-    /* ── Compact summary card ──────────────────────────────── */
+    /* ── Compact card (route + fuel only) ──────────────────── */
     .route-card {
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
-      padding: 0.25rem 1rem 1rem;
+      gap: 0.625rem;
+      padding: 0 1rem 0.875rem;
     }
     .panel[data-state="full"] .route-card { display: none; }
 
-    .card-stats {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 0.5rem;
+    .card-route {
+      margin: 0;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .card-stat { display: flex; flex-direction: column; gap: 2px; }
-    .card-stat-label {
-      font-size: 0.625rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-4);
+    .card-fuel {
+      display: flex;
+      align-items: baseline;
+      gap: 0.375rem;
     }
-    .card-stat-value {
+    .card-fuel-value {
       font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 1rem;
+      font-size: 1.125rem;
       font-weight: 700;
       color: var(--text);
     }
-
-    .card-total {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      padding: 0.5rem 0.75rem;
-      background: var(--subtle);
-      border-radius: 0.5rem;
-      border: 1px solid var(--border-2);
-    }
-    .card-total-label {
-      font-size: 0.6875rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-4);
-    }
-    .card-total-value {
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 1.125rem;
-      font-weight: 800;
-      color: var(--accent-text);
+    .card-fuel-label {
+      font-size: 0.75rem;
+      color: var(--text-3);
     }
 
     .card-play {
@@ -1178,15 +1143,14 @@
       justify-content: center;
       gap: 0.375rem;
       width: 100%;
-      padding: 0.75rem;
+      padding: 0.625rem;
       background: var(--accent);
       color: #fff;
       border: none;
-      border-radius: 0.625rem;
-      font-size: 0.9375rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.15s;
     }
     .card-play:hover { background: var(--accent-h); }
 
@@ -1203,51 +1167,49 @@
       justify-content: center;
     }
 
-    /* Bring the new-trip form right under the drag handle so it's
-       visible while the sheet is collapsed (no trips yet). */
     .section-new-trip { order: -2; }
 
     .section { padding: 0.75rem 1rem; }
 
     /* ── Compact-mode visibility ───────────────────────────── */
-    /* In compact mode: hide every section + the mobile action row. */
     .panel[data-state="compact"] .section,
     .panel[data-state="compact"] .mobile-actions {
       display: none;
     }
-    /* ...unless there is no trip yet, in which case the new-trip form
-       is what should be visible (no card is rendered). */
     .panel[data-state="compact"]:not(:has(.route-card)) .section-new-trip {
       display: flex;
     }
 
-    /* HUD: move to the top, compact horizontal layout. */
+    /* ── HUD: compact data-only chip at top-right ─────────── */
     .hud {
       position: absolute;
       top: 12px;
       right: 12px;
-      left: 64px;
+      left: auto;
       bottom: auto;
-      padding: 0.625rem 0.875rem;
-      border-radius: 0.875rem;
-      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.75rem;
       min-width: 0;
+      gap: 0.25rem;
     }
-    .hud-speed-row { gap: 0.375rem; }
-    .hud-speed-num { font-size: 1.75rem; }
-    .hud-speed-meta { padding-bottom: 2px; }
-    .hud-speed-unit { font-size: 0.6875rem; }
-    .hud-badge { font-size: 0.625rem; }
 
-    .hud-sep { display: none; }
+    .hud-speed-row { gap: 0.25rem; }
+    .hud-speed-num { font-size: 1.5rem; }
+    .hud-speed-meta { padding-bottom: 0; gap: 2px; }
+    .hud-speed-unit { font-size: 0.625rem; }
+    .hud-badge { font-size: 0.5625rem; }
 
+    .hud-sep  { display: none; }
+    .hud-bar  { display: none; }
+    .hud-of   { display: none; }
+
+    .hud-stat { gap: 0; }
     .hud-stat-label { display: none; }
-    .hud-stat-vals strong { font-size: 0.75rem; }
-    .hud-of { display: none; }
+    .hud-stat-vals strong { font-size: 0.6875rem; }
 
-    .hud-cost { flex-direction: row; align-items: baseline; gap: 0.375rem; }
+    .hud-cost { flex-direction: column; gap: 0; }
     .hud-cost-label { display: none; }
-    .hud-cost-val { font-size: 1rem; }
+    .hud-cost-val { font-size: 0.875rem; }
     .hud-cost-total { display: none; }
   }
 </style>

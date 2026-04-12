@@ -446,34 +446,11 @@
            sheet is collapsed. Drag up to expand for the full form. -->
       {#if routeData}
         <div class="route-card">
-          <div class="card-endpoints">
-            <div class="endpoint">
-              <span class="endpoint-dot origin"></span>
-              <div class="endpoint-body">
-                <span class="endpoint-label">Desde</span>
-                <span class="endpoint-value">{origin}</span>
-              </div>
-            </div>
-            <div class="endpoint">
-              <span class="endpoint-dot dest"></span>
-              <div class="endpoint-body">
-                <span class="endpoint-label">Hasta</span>
-                <span class="endpoint-value">{destination}</span>
-              </div>
-            </div>
+          <p class="card-route">{origin} → {destination}</p>
+          <div class="card-fuel">
+            <span class="card-fuel-value">{fmtL(totalLitres)}</span>
+            <span class="card-fuel-label">· {fmtCLP(totalCost)}</span>
           </div>
-
-          <div class="card-stats">
-            <div class="card-stat">
-              <span class="card-stat-label">Distancia</span>
-              <span class="card-stat-value">{fmtKm(routeData.totalDistanceKm)}</span>
-            </div>
-            <div class="card-stat">
-              <span class="card-stat-label">Combustible</span>
-              <span class="card-stat-value">{fmtL(totalLitres)}</span>
-            </div>
-          </div>
-
           <button class="card-play" onclick={animState === 'playing' ? pause : play}>
             {#if animState === 'playing'}
               ⏸ Pausar
@@ -834,18 +811,15 @@
   }
   .hud-cost-total { font-size: .6875rem; color: #475569; }
 
-  /* ── Mobile ────────────────────────────────────────────────────────────── */
+  /* ── Mobile (iPhone 16 Pro: 402px, Pro Max: 440px) ───────────────────── */
   @media (max-width: 768px) {
     header { display: none; }
 
     .body { position: relative; }
 
-    .map-wrap {
-      position: absolute;
-      inset: 0;
-    }
+    .map-wrap { position: absolute; inset: 0; }
 
-    /* Panel becomes a bottom sheet floating over the map. */
+    /* ── Bottom sheet ─────────────────────────────────────── */
     .panel {
       position: absolute;
       left: 0; right: 0; bottom: 0;
@@ -853,28 +827,25 @@
       border-right: none;
       border-top: 1px solid var(--border);
       border-radius: 1rem 1rem 0 0;
-      box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.14);
       overflow: hidden;
-      transition: height 0.28s ease, background 0.2s, border-color 0.2s;
+      transition: height 0.25s ease, background 0.2s, border-color 0.2s;
       z-index: 10;
       overscroll-behavior: contain;
     }
-    /* Snap heights: hidden peek, compact form/card, expanded full. */
-    .panel[data-state="hidden"]  { height: 44px; }
-    .panel[data-state="compact"] { height: 280px; }
-    .panel[data-state="full"]    { height: 82vh; overflow-y: auto; }
+    .panel[data-state="hidden"]  { height: 36px; }
+    .panel[data-state="compact"] { height: auto; max-height: 240px; }
+    .panel[data-state="full"]    { height: 80vh; overflow-y: auto; }
+    .panel.dragging { transition: none; overflow: hidden; }
 
-    /* Disable the snap transition while the user is actively dragging. */
-    .panel.dragging { transition: none; }
-
-    /* Drag handle — hit target is generous for touch. */
+    /* Drag handle */
     .sheet-handle {
       display: flex;
       justify-content: center;
       align-items: center;
       width: 100%;
-      min-height: 32px;
-      padding: 0.75rem 0 0.5rem;
+      min-height: 28px;
+      padding: 0.625rem 0 0.375rem;
       background: var(--surface);
       border: none;
       cursor: grab;
@@ -887,75 +858,44 @@
     }
     .sheet-handle:active { cursor: grabbing; }
     .handle-bar {
-      width: 44px;
-      height: 5px;
-      border-radius: 3px;
+      width: 36px;
+      height: 4px;
+      border-radius: 2px;
       background: var(--border);
     }
 
-    /* ── Compact result card ───────────────────────────────── */
-    /* Shown only in compact state when a route has been calculated.
-       Full state shows the complete form/details instead. */
+    /* ── Compact card (route + fuel only) ──────────────────── */
     .route-card {
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
-      padding: 0.25rem 1rem 1rem;
+      gap: 0.625rem;
+      padding: 0 1rem 0.875rem;
     }
     .panel[data-state="full"] .route-card { display: none; }
 
-    .card-endpoints {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      position: relative;
-    }
-    .endpoint { display: flex; align-items: flex-start; gap: 0.625rem; }
-    .endpoint-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      margin-top: 5px;
-    }
-    .endpoint-dot.origin { background: var(--accent); }
-    .endpoint-dot.dest   { background: #10b981; }
-    .endpoint-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-    .endpoint-label {
-      font-size: 0.625rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-4);
-    }
-    .endpoint-value {
-      font-size: 0.875rem;
+    .card-route {
+      margin: 0;
+      font-size: 0.8125rem;
+      font-weight: 500;
       color: var(--text);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-
-    .card-stats {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.5rem;
-      padding-top: 0.5rem;
-      border-top: 1px solid var(--border-2);
+    .card-fuel {
+      display: flex;
+      align-items: baseline;
+      gap: 0.375rem;
     }
-    .card-stat { display: flex; flex-direction: column; gap: 2px; }
-    .card-stat-label {
-      font-size: 0.625rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-4);
-    }
-    .card-stat-value {
+    .card-fuel-value {
       font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 1.0625rem;
+      font-size: 1.125rem;
       font-weight: 700;
       color: var(--text);
+    }
+    .card-fuel-label {
+      font-size: 0.75rem;
+      color: var(--text-3);
     }
 
     .card-play {
@@ -964,21 +904,18 @@
       justify-content: center;
       gap: 0.375rem;
       width: 100%;
-      padding: 0.75rem;
+      padding: 0.625rem;
       background: var(--accent);
       color: #fff;
       border: none;
-      border-radius: 0.625rem;
-      font-size: 0.9375rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.15s;
     }
     .card-play:hover { background: var(--accent-h); }
 
-    /* In compact mode:
-       - If no route yet, show only the first section (the form).
-       - If a route exists, the .route-card replaces every section. */
+    /* Compact-mode visibility. */
     .panel[data-state="compact"] .section ~ .section,
     .panel[data-state="compact"] .route-card ~ .section {
       display: none;
@@ -986,32 +923,35 @@
 
     .section { padding: 0.75rem 1rem; }
 
-    /* HUD: move to the top of the screen, compact horizontal layout. */
+    /* ── HUD: compact data-only chip at top-right ─────────── */
     .hud {
       position: absolute;
       top: 12px;
       right: 12px;
-      left: 64px;                 /* leave room for hamburger */
+      left: auto;
       bottom: auto;
-      padding: 0.625rem 0.875rem;
-      border-radius: 0.875rem;
-      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.75rem;
       min-width: 0;
+      gap: 0.25rem;
     }
-    .hud-speed-row { gap: 0.375rem; }
-    .hud-speed-num { font-size: 1.75rem; }
-    .hud-speed-meta { padding-bottom: 2px; }
-    .hud-speed-unit { font-size: 0.6875rem; }
 
-    .hud-sep { display: none; }
+    .hud-speed-row { gap: 0.25rem; }
+    .hud-speed-num { font-size: 1.5rem; }
+    .hud-speed-meta { padding-bottom: 0; gap: 2px; }
+    .hud-speed-unit { font-size: 0.625rem; }
 
+    .hud-sep   { display: none; }
+    .hud-bar   { display: none; }
+    .hud-of    { display: none; }
+
+    .hud-stat { gap: 0; }
     .hud-stat-label { display: none; }
-    .hud-stat-values strong { font-size: 0.75rem; }
-    .hud-of { display: none; }
+    .hud-stat-values strong { font-size: 0.6875rem; }
 
-    .hud-cost { flex-direction: row; align-items: baseline; gap: 0.375rem; }
+    .hud-cost { flex-direction: column; gap: 0; }
     .hud-cost-label { display: none; }
-    .hud-cost-val { font-size: 1rem; }
+    .hud-cost-val { font-size: 0.875rem; }
     .hud-cost-total { display: none; }
   }
 </style>
