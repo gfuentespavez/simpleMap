@@ -1,0 +1,66 @@
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg:           #f9fafb;
+  --surface:      #ffffff;
+  --subtle:       #f9fafb;
+  --hover:        #f3f4f6;
+  --border:       #e5e7eb;
+  --border-2:     #f3f4f6;
+  --input-bg:     #f9fafb;
+  --input-border: #d1d5db;
+
+  --text:   #111827;
+  --text-2: #374151;
+  --text-3: #6b7280;
+  --text-4: #9ca3af;
+
+  --accent:        #4f46e5;
+  --accent-h:      #4338ca;
+  --accent-bg:     #eef2ff;
+  --accent-border: #a5b4fc;
+  --accent-text:   #4f46e5;
+
+  --danger:    #dc2626;
+  --danger-bg: #fee2e2;
+  --danger-h:  #fecaca;
+}
+
+[data-theme="dark"] {
+  --bg:           #0f172a;
+  --surface:      #1e293b;
+  --subtle:       #1a2438;
+  --hover:        #2d3f55;
+  --border:       #2d3f55;
+  --border-2:     #243347;
+  --input-bg:     #1a2438;
+  --input-border: #3d5166;
+
+  --text:   #f1f5f9;
+  --text-2: #cbd5e1;
+  --text-3: #94a3b8;
+  --text-4: #64748b;
+
+  --accent:        #6366f1;
+  --accent-h:      #818cf8;
+  --accent-bg:     #1e1b4b;
+  --accent-border: #4338ca;
+  --accent-text:   #a5b4fc;
+
+  --danger:    #f87171;
+  --danger-bg: #450a0a;
+  --danger-h:  #7f1d1d;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  transition: background 0.2s, color 0.2s;
+}
