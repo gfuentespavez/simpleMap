@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Footer Test</title>
+
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+
+    <style>
+        body {
+            margin: 0;
+            background: #3f4145;
+            font-family: Arial, sans-serif;
+        }
+
+        .footer {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            color: #ddd;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .footer-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .footer-logo {
+            height: 40px;
+        }
+
+        .footer-social a {
+            color: #aaa;
+            margin-left: 12px;
+            font-size: 16px;
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+
+        .footer-social a:hover {
+            color: #ffcc05;
+        }
+
+        .footer strong {
+            display: block;
+            color: #fff;
+            margin-bottom: 2px;
+        }
+
+        .footer-divider {
+            border-top: 1px solid rgba(255,255,255,0.2);
+            margin: 16px 0;
+        }
+
+        .footer-copy {
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        .hover-accent {
+            transition: color 0.3s ease;
+        }
+
+        .hover-accent:hover {
+            color: #ffcc05;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="footer">
+
+    <div class="footer-top">
+        <img src="https://d26q11cgz8q0ri.cloudfront.net/2025/09/25000650/LOGO-CLBB-ORIGINAL-BLANCO-APAISADO.png" class="footer-logo" alt="Logo">
+
+        <div class="footer-social">
+            <a href="#"><i class="fab fa-linkedin-in"></i></a>
+            <a href="#"><i class="fab fa-instagram"></i></a>
+            <a href="#"><i class="fab fa-youtube"></i></a>
+        </div>
+    </div>
+
+    <p>
+        <strong>City Lab Biobío</strong>
+        En cooperación con <span class="hover-accent">MIT Media Lab</span> · #CityScienceNetwork<br>
+        <span class="footer-copy">© 2026 · Todos los derechos reservados</span>
+    </p>
+
+    <div class="footer-divider"></div>
+
+    <p>
+        <strong class="hover-accent">Dirección Estudios</strong>
+        Facultad Arquitectura, Urbanismo y Geografía, UdeC
+    </p>
+
+    <p>
+        <strong class="hover-accent">Dirección Comunicaciones y Vinculación</strong>
+        Edificio Bío Bío, Hualpén
+    </p>
+
+</div>
+
+</body>
+</html>

@@ -3,6 +3,7 @@
   import { loader } from '$lib/mapLoader.js';
   import { PUBLIC_GOOGLE_MAP_ID, PUBLIC_GOOGLE_MAPS_API_KEY } from '$env/static/public';
   import { theme } from '$lib/theme.svelte.js';
+  import { sidebar } from '$lib/sidebarState.svelte.js';
 
   // ── Parámetros ────────────────────────────────────────────────────────────
   let consumptionPer100km = $state(10);
@@ -628,6 +629,164 @@
     return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(Math.round(n));
   }
   function fmtRatio(n) { return `${n.toFixed(2)} km/L`; }
+
+  // ── Compare mode ──────────────────────────────────────────────────────────
+  let compareMode = $state(false);
+  let cmpContainerA;
+  let cmpContainerB;
+  let cmpMapA = null;
+  let cmpMapB = null;
+  let cmpSchemeA = null;
+  let cmpSchemeB = null;
+
+  // Route A
+  let cmpOriginA      = $state('');
+  let cmpDestA        = $state('');
+  let cmpRouteA       = $state(null); // { distanceKm, durationS, durationText, litres, cost, encodedPolyline }
+  let cmpLoadingA     = $state(false);
+  let cmpErrorA       = $state('');
+
+  // Route B
+  let cmpOriginB      = $state('');
+  let cmpDestB        = $state('');
+  let cmpRouteB       = $state(null);
+  let cmpLoadingB     = $state(false);
+  let cmpErrorB       = $state('');
+
+  let cmpLitresA = $derived(cmpRouteA && kmPerLitre > 0 ? cmpRouteA.distanceKm / kmPerLitre : 0);
+  let cmpCostA   = $derived(cmpLitresA * fuelPriceCLP);
+  let cmpLitresB = $derived(cmpRouteB && kmPerLitre > 0 ? cmpRouteB.distanceKm / kmPerLitre : 0);
+  let cmpCostB   = $derived(cmpLitresB * fuelPriceCLP);
+
+  let sidebarWasCollapsed = false;
+
+  function enterCompare() {
+    compareMode = true;
+    sidebarWasCollapsed = sidebar.collapsed;
+    sidebar.collapse();
+    // Build compare maps on next tick once containers are mounted
+    requestAnimationFrame(() => {
+      buildCmpMap('A');
+      buildCmpMap('B');
+    });
+  }
+
+  function exitCompare() {
+    compareMode = false;
+    if (!sidebarWasCollapsed) sidebar.expand();
+    // Clean up compare map overlays
+    cmpRouteA = null; cmpRouteB = null;
+    cmpErrorA = ''; cmpErrorB = '';
+    cmpMapA = null; cmpMapB = null;
+    cmpSchemeA = null; cmpSchemeB = null;
+  }
+
+  function buildCmpMap(side) {
+    const scheme = theme.isDark ? 'DARK' : 'LIGHT';
+    const cnt = side === 'A' ? cmpContainerA : cmpContainerB;
+    if (!cnt || !MapClass) return;
+    cnt.innerHTML = '';
+    const m = new MapClass(cnt, {
+      center: { lat: -36.8197, lng: -73.0521 },
+      zoom: 12,
+      mapId: PUBLIC_GOOGLE_MAP_ID,
+      colorScheme: scheme,
+      mapTypeControl: false,
+    });
+    if (side === 'A') { cmpMapA = m; cmpSchemeA = scheme; }
+    else              { cmpMapB = m; cmpSchemeB = scheme; }
+  }
+
+  // Rebuild compare maps on theme change
+  $effect(() => {
+    if (!compareMode || !MapClass) return;
+    const scheme = theme.isDark ? 'DARK' : 'LIGHT';
+    if (cmpSchemeA !== scheme) {
+      const cA = cmpMapA?.getCenter()?.toJSON() ?? { lat: -36.8197, lng: -73.0521 };
+      const zA = cmpMapA?.getZoom() ?? 12;
+      buildCmpMap('A');
+      if (cmpMapA) { cmpMapA.setCenter(cA); cmpMapA.setZoom(zA); }
+      if (cmpRouteA) drawCmpRoute('A', cmpRouteA);
+    }
+    if (cmpSchemeB !== scheme) {
+      const cB = cmpMapB?.getCenter()?.toJSON() ?? { lat: -36.8197, lng: -73.0521 };
+      const zB = cmpMapB?.getZoom() ?? 12;
+      buildCmpMap('B');
+      if (cmpMapB) { cmpMapB.setCenter(cB); cmpMapB.setZoom(zB); }
+      if (cmpRouteB) drawCmpRoute('B', cmpRouteB);
+    }
+  });
+
+  async function calcCmpRoute(side) {
+    const origin = side === 'A' ? cmpOriginA : cmpOriginB;
+    const dest   = side === 'A' ? cmpDestA   : cmpDestB;
+    if (!origin.trim() || !dest.trim()) return;
+
+    if (side === 'A') { cmpLoadingA = true; cmpErrorA = ''; }
+    else              { cmpLoadingB = true; cmpErrorB = ''; }
+
+    try {
+      const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': PUBLIC_GOOGLE_MAPS_API_KEY,
+          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
+        },
+        body: JSON.stringify({
+          origin: { address: origin.trim() },
+          destination: { address: dest.trim() },
+          travelMode: 'DRIVE',
+          computeAlternativeRoutes: false,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.routes?.length) throw new Error(data.error?.message ?? 'No se encontró ruta.');
+
+      const route = data.routes[0];
+      const durationS = parseInt(route.duration ?? '0');
+      const routeInfo = {
+        distanceKm: route.distanceMeters / 1000,
+        durationS,
+        durationText: parseDuration(route.duration),
+        encodedPolyline: route.polyline.encodedPolyline,
+      };
+
+      if (side === 'A') cmpRouteA = routeInfo;
+      else              cmpRouteB = routeInfo;
+
+      await drawCmpRoute(side, routeInfo);
+    } catch (e) {
+      if (side === 'A') cmpErrorA = e.message;
+      else              cmpErrorB = e.message;
+    } finally {
+      if (side === 'A') cmpLoadingA = false;
+      else              cmpLoadingB = false;
+    }
+  }
+
+  async function drawCmpRoute(side, routeInfo) {
+    const m = side === 'A' ? cmpMapA : cmpMapB;
+    if (!m) return;
+
+    const { encoding }     = await loader.importLibrary('geometry');
+    const { Polyline }     = await loader.importLibrary('maps');
+    const { LatLngBounds } = await loader.importLibrary('core');
+
+    const path = encoding.decodePath(routeInfo.encodedPolyline);
+    const color = side === 'A' ? '#4f46e5' : '#059669';
+
+    new Polyline({ path, strokeColor: color, strokeWeight: 5, strokeOpacity: 0.9, map: m });
+
+    const bounds = new LatLngBounds();
+    path.forEach(p => bounds.extend(p));
+    m.fitBounds(bounds, 48);
+  }
+
+  function handleCmpKeydown(side) {
+    return (e) => { if (e.key === 'Enter') calcCmpRoute(side); };
+  }
 </script>
 
 <div class="experiment">
@@ -637,7 +796,15 @@
       <p>Suma varios viajes del día y visualiza el recorrido con contador de combustible en tiempo real.</p>
     </div>
     <div class="header-actions">
-      {#if trips.length > 0}
+      {#if !compareMode}
+        <button class="btn-compare" onclick={enterCompare}>
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M9 2a1 1 0 00-1 1v14a1 1 0 102 0V3a1 1 0 00-1-1zM3 8a1 1 0 011-1h2a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h2a1 1 0 110 2H4a1 1 0 01-1-1zm10-4a1 1 0 011-1h2a1 1 0 110 2h-2a1 1 0 01-1-1zm0 4a1 1 0 011-1h2a1 1 0 110 2h-2a1 1 0 01-1-1z"/></svg>
+          Comparar rutas
+        </button>
+      {:else}
+        <button class="btn-clear" onclick={exitCompare}>Salir comparación</button>
+      {/if}
+      {#if trips.length > 0 && !compareMode}
         <button class="btn-pdf" onclick={generatePDF} disabled={pdfLoading}>
           {#if pdfLoading}
             <span class="spinner-sm"></span> Generando…
@@ -651,6 +818,73 @@
     </div>
   </header>
 
+  {#if compareMode}
+  <div class="compare-body">
+    <!-- Route A -->
+    <div class="cmp-side">
+      <div class="cmp-form">
+        <p class="cmp-label" style="color: #4f46e5;">Ruta A</p>
+        <div class="cmp-fields">
+          <input type="text" placeholder="Origen A" bind:value={cmpOriginA} onkeydown={handleCmpKeydown('A')} />
+          <input type="text" placeholder="Destino A" bind:value={cmpDestA} onkeydown={handleCmpKeydown('A')} />
+          <button class="btn-add cmp-btn" onclick={() => calcCmpRoute('A')} disabled={cmpLoadingA || !cmpOriginA || !cmpDestA}>
+            {#if cmpLoadingA}<span class="spinner"></span>{:else}Calcular{/if}
+          </button>
+        </div>
+        {#if cmpErrorA}<p class="error">{cmpErrorA}</p>{/if}
+        {#if cmpRouteA}
+          <div class="cmp-stats">
+            <div class="cmp-stat"><span>Distancia</span><strong>{fmtKm(cmpRouteA.distanceKm)}</strong></div>
+            <div class="cmp-stat"><span>Tiempo</span><strong>{cmpRouteA.durationText}</strong></div>
+            <div class="cmp-stat"><span>Combustible</span><strong>{fmtL(cmpLitresA)}</strong></div>
+            <div class="cmp-stat accent"><span>Costo</span><strong>{fmtCLP(cmpCostA)}</strong></div>
+          </div>
+        {/if}
+      </div>
+      <div class="cmp-map" bind:this={cmpContainerA}></div>
+    </div>
+
+    <!-- Route B -->
+    <div class="cmp-side">
+      <div class="cmp-form">
+        <p class="cmp-label" style="color: #059669;">Ruta B</p>
+        <div class="cmp-fields">
+          <input type="text" placeholder="Origen B" bind:value={cmpOriginB} onkeydown={handleCmpKeydown('B')} />
+          <input type="text" placeholder="Destino B" bind:value={cmpDestB} onkeydown={handleCmpKeydown('B')} />
+          <button class="btn-add cmp-btn" onclick={() => calcCmpRoute('B')} disabled={cmpLoadingB || !cmpOriginB || !cmpDestB}>
+            {#if cmpLoadingB}<span class="spinner"></span>{:else}Calcular{/if}
+          </button>
+        </div>
+        {#if cmpErrorB}<p class="error">{cmpErrorB}</p>{/if}
+        {#if cmpRouteB}
+          <div class="cmp-stats">
+            <div class="cmp-stat"><span>Distancia</span><strong>{fmtKm(cmpRouteB.distanceKm)}</strong></div>
+            <div class="cmp-stat"><span>Tiempo</span><strong>{cmpRouteB.durationText}</strong></div>
+            <div class="cmp-stat"><span>Combustible</span><strong>{fmtL(cmpLitresB)}</strong></div>
+            <div class="cmp-stat accent"><span>Costo</span><strong>{fmtCLP(cmpCostB)}</strong></div>
+          </div>
+        {/if}
+      </div>
+      <div class="cmp-map" bind:this={cmpContainerB}></div>
+    </div>
+
+    <!-- Comparison summary bar -->
+    {#if cmpRouteA && cmpRouteB}
+      {@const diff = cmpCostA - cmpCostB}
+      {@const cheaper = diff > 0 ? 'B' : diff < 0 ? 'A' : null}
+      <div class="cmp-summary">
+        <span class="cmp-summary-label">
+          {#if cheaper}
+            Ruta {cheaper} es más económica por <strong>{fmtCLP(Math.abs(diff))}</strong>
+            ({fmtL(Math.abs(cmpLitresA - cmpLitresB))} menos)
+          {:else}
+            Ambas rutas tienen el mismo costo
+          {/if}
+        </span>
+      </div>
+    {/if}
+  </div>
+  {:else}
   <div class="body">
     <aside
       class="panel"
@@ -701,6 +935,7 @@
       <!-- Mobile-only action row. Desktop shows these same actions in the page header. -->
       {#if trips.length > 0}
         <div class="mobile-actions">
+          <button class="btn-compare" onclick={enterCompare}>Comparar</button>
           <button class="btn-pdf" onclick={generatePDF} disabled={pdfLoading}>
             {#if pdfLoading}
               <span class="spinner-sm"></span> Generando…
@@ -870,6 +1105,7 @@
       {/if}
     </div>
   </div>
+  {/if}
 </div>
 
 <style>
@@ -1049,6 +1285,87 @@
   .hud-cost-val { font-size: 1.5rem; font-weight: 800; line-height: 1.1; font-family: 'SF Mono','Fira Code',monospace; color: #818cf8; }
   .hud-cost-total { font-size: .6875rem; color: #475569; }
 
+  /* ── Compare button ── */
+  .btn-compare {
+    display: flex; align-items: center; gap: .375rem;
+    padding: .375rem .875rem; background: var(--surface); color: var(--accent-text);
+    border: 1px solid var(--accent-border); border-radius: .5rem;
+    font-size: .8125rem; font-weight: 500; cursor: pointer;
+    white-space: nowrap; transition: background .15s;
+  }
+  .btn-compare:hover { background: var(--accent-bg); }
+  .btn-compare svg { width: 14px; height: 14px; }
+
+  /* ── Compare mode ── */
+  .compare-body {
+    flex: 1; display: flex; overflow: hidden; position: relative;
+  }
+  .cmp-side {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .cmp-side + .cmp-side { border-left: 2px solid var(--border); }
+
+  .cmp-form {
+    padding: .75rem 1rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: .5rem;
+    flex-shrink: 0;
+  }
+  .cmp-label {
+    margin: 0; font-size: .75rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .cmp-fields {
+    display: flex; gap: .375rem; align-items: center;
+  }
+  .cmp-fields input {
+    flex: 1; min-width: 0;
+    padding: .375rem .5rem;
+    border: 1px solid var(--input-border); border-radius: .375rem;
+    font-size: .8125rem; color: var(--text); background: var(--input-bg);
+    outline: none;
+  }
+  .cmp-fields input:focus { border-color: var(--accent); }
+  .cmp-btn {
+    width: auto !important; padding: .375rem .75rem !important;
+    font-size: .75rem !important; white-space: nowrap; flex-shrink: 0;
+  }
+
+  .cmp-stats {
+    display: flex; gap: .5rem; flex-wrap: wrap;
+  }
+  .cmp-stat {
+    flex: 1; min-width: 80px;
+    background: var(--subtle); padding: .375rem .5rem; border-radius: .375rem;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .cmp-stat span {
+    font-size: .625rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--text-4);
+  }
+  .cmp-stat strong {
+    font-size: .8125rem; font-weight: 700; color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .cmp-stat.accent strong { color: var(--accent-text); }
+
+  .cmp-map { flex: 1; min-height: 200px; }
+
+  .cmp-summary {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(10px);
+    color: #fff; padding: .625rem 1.25rem; border-radius: .75rem;
+    font-size: .8125rem; white-space: nowrap;
+    box-shadow: 0 4px 20px rgba(0,0,0,.3);
+    border: 1px solid rgba(255,255,255,.07);
+    z-index: 5;
+  }
+  .cmp-summary strong {
+    color: #a5b4fc; font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
   /* ── Mobile (iPhone 16 Pro: 402px, Pro Max: 440px) ───────────────────── */
   @media (max-width: 768px) {
     header { display: none; }
@@ -1211,5 +1528,18 @@
     .hud-cost-label { display: none; }
     .hud-cost-val { font-size: 0.875rem; }
     .hud-cost-total { display: none; }
+
+    /* Compare mode: stack vertically on mobile */
+    .compare-body { flex-direction: column; }
+    .cmp-side + .cmp-side { border-left: none; border-top: 2px solid var(--border); }
+    .cmp-fields { flex-wrap: wrap; }
+    .cmp-fields input { font-size: 16px !important; }
+    .cmp-summary {
+      bottom: 8px; font-size: .75rem;
+      padding: .5rem .75rem;
+      white-space: normal; text-align: center;
+      max-width: 90vw;
+    }
+    .btn-compare { font-size: .75rem; padding: .25rem .5rem; }
   }
 </style>

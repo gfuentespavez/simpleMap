@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import { experiments } from '$lib/experiments/registry.js';
   import { theme } from '$lib/theme.svelte.js';
+  import { sidebar } from '$lib/sidebarState.svelte.js';
 
   let { children } = $props();
 
@@ -27,7 +28,7 @@
   });
 </script>
 
-<div class="app" class:drawer-open={sidebarOpen}>
+<div class="app" class:drawer-open={sidebarOpen} class:sidebar-collapsed={sidebar.collapsed}>
   <!-- Mobile-only hamburger. Floats above the map/page content. -->
   <button
     class="menu-btn"
@@ -123,7 +124,41 @@
         </a>
       {/each}
     </nav>
+
+    <footer class="site-footer">
+      Desarrollado por <strong>Germán Fuentes</strong>
+      <span>© {new Date().getFullYear()} · All Rights Reserved</span>
+    </footer>
+
+    <button
+      class="collapse-btn"
+      onclick={() => sidebar.toggle()}
+      title={sidebar.collapsed ? 'Mostrar panel' : 'Ocultar panel'}
+      aria-label={sidebar.collapsed ? 'Mostrar panel' : 'Ocultar panel'}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        {#if sidebar.collapsed}
+          <polyline points="9 18 15 12 9 6"/>
+        {:else}
+          <polyline points="15 18 9 12 15 6"/>
+        {/if}
+      </svg>
+    </button>
   </aside>
+
+  <!-- Desktop-only expand button when sidebar is collapsed -->
+  {#if sidebar.collapsed}
+    <button
+      class="expand-btn"
+      onclick={() => sidebar.expand()}
+      title="Mostrar panel"
+      aria-label="Mostrar panel"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="9 18 15 12 9 6"/>
+      </svg>
+    </button>
+  {/if}
 
   <main>
     {@render children()}
@@ -270,6 +305,50 @@
     transition: background 0.2s;
   }
 
+  .site-footer {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    color: var(--text-4);
+  }
+  .site-footer strong {
+    font-weight: 600;
+    color: var(--text-3);
+  }
+
+  /* Collapse/expand button — desktop only */
+  .collapse-btn {
+    display: flex; align-items: center; justify-content: center;
+    padding: 0.625rem;
+    background: none; border: none; border-top: 1px solid var(--border);
+    color: var(--text-4); cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .collapse-btn:hover { background: var(--hover); color: var(--text-2); }
+  .collapse-btn svg { width: 16px; height: 16px; }
+
+  .expand-btn {
+    position: fixed; top: 12px; left: 12px; z-index: 20;
+    width: 36px; height: 36px;
+    display: none; /* shown only when collapsed on desktop */
+    align-items: center; justify-content: center;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 0.5rem; color: var(--text-3); cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,.12); transition: background 0.15s;
+  }
+  .expand-btn:hover { background: var(--hover); color: var(--text); }
+  .expand-btn svg { width: 16px; height: 16px; }
+
+  /* Desktop collapsed state */
+  @media (min-width: 769px) {
+    .app.sidebar-collapsed .sidebar { display: none; }
+    .app.sidebar-collapsed .expand-btn { display: flex; }
+  }
+
   /* Mobile-only UI: hidden on desktop. */
   .menu-btn { display: none; }
   .backdrop { display: none; }
@@ -326,5 +405,8 @@
     main {
       width: 100%;
     }
+
+    .collapse-btn { display: none; }
+    .expand-btn   { display: none !important; }
   }
 </style>

@@ -40,6 +40,19 @@
   let traveledPts  = [];   // LatLngLiteral[] accumulated as particle moves
   let traveledIdx  = 0;   // index into routeData.points up to which we've already added to traveledPts
 
+  // ── GPS tracking ──────────────────────────────────────────────────────────
+  let gpsActive     = $state(false);
+  let gpsWatchId    = null;
+  let gpsPath       = $state([]);
+  let gpsMarker     = null;
+  let gpsLine       = null;
+  let gpsDistanceKm = $state(0);
+  let gpsSpeed      = $state(0);          // km/h from GPS
+  let gpsFollowing  = $state(true);
+  let gpsError      = $state('');
+  let gpsLitres     = $derived(kmPerLitre > 0 ? gpsDistanceKm / kmPerLitre : 0);
+  let gpsCost       = $derived(gpsLitres * fuelPriceCLP);
+
   // ── Map objects ───────────────────────────────────────────────────────────
   let container;
   let map = $state(null);
@@ -71,12 +84,25 @@
         0%,100% { box-shadow: 0 0 0 3px rgba(79,70,229,.3),  0 0 14px rgba(79,70,229,.4); }
         50%     { box-shadow: 0 0 0 9px rgba(79,70,229,.08), 0 0 30px rgba(79,70,229,.9); }
       }
+      .rv-gps-dot {
+        width: 18px; height: 18px;
+        background: #4285f4; border-radius: 50%;
+        border: 3px solid #fff;
+        box-shadow: 0 0 0 3px rgba(66,133,244,.35), 0 0 14px rgba(66,133,244,.5);
+        animation: rv-gps-pulse 2s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes rv-gps-pulse {
+        0%,100% { box-shadow: 0 0 0 3px rgba(66,133,244,.3),  0 0 10px rgba(66,133,244,.4); }
+        50%     { box-shadow: 0 0 0 10px rgba(66,133,244,.08), 0 0 24px rgba(66,133,244,.7); }
+      }
     `;
     document.head.appendChild(s);
   });
 
   onDestroy(() => {
     stopAnim();
+    stopGps();
     document.querySelector('style[data-owner="route-vis"]')?.remove();
   });
 
@@ -95,6 +121,7 @@
         if (wasPlaying) play();
       });
     }
+    if (gpsActive) redrawGpsOverlays();
   });
 
   function buildMap(c, z) {
@@ -105,6 +132,9 @@
     bgLine = null;
     traveledLine = null;
     particle = null;
+    // Null GPS overlay refs tied to old map
+    gpsMarker = null;
+    gpsLine = null;
     map = new MapClass(container, {
       center: c,
       zoom: z,
@@ -112,6 +142,7 @@
       colorScheme: scheme,
       mapTypeControl: false,
     });
+    map.addListener('dragstart', () => { if (gpsActive) gpsFollowing = false; });
   }
 
   async function renderRouteOverlays() {
@@ -334,6 +365,121 @@
     };
   }
 
+  // ── GPS functions ──────────────────────────────────────────────────────────
+  function haversine(a, b) {
+    const R = 6371;
+    const dLat = (b.lat - a.lat) * Math.PI / 180;
+    const dLng = (b.lng - a.lng) * Math.PI / 180;
+    const sLat = Math.sin(dLat / 2);
+    const sLng = Math.sin(dLng / 2);
+    const h = sLat * sLat +
+      Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * sLng * sLng;
+    return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  }
+
+  async function startGps() {
+    if (!navigator.geolocation) {
+      gpsError = 'GPS no disponible en este dispositivo.';
+      return;
+    }
+    gpsError = '';
+    gpsActive = true;
+    gpsFollowing = true;
+    gpsPath = [];
+    gpsDistanceKm = 0;
+    gpsSpeed = 0;
+
+    const { Polyline } = await loader.importLibrary('maps');
+    const { AdvancedMarkerElement } = await loader.importLibrary('marker');
+
+    // Create GPS trail polyline
+    gpsLine = new Polyline({
+      path: [], strokeColor: '#4285f4', strokeWeight: 5, strokeOpacity: 0.8, map, zIndex: 5,
+    });
+
+    // Create GPS position marker
+    const el = document.createElement('div');
+    el.className = 'rv-gps-dot';
+    gpsMarker = new AdvancedMarkerElement({ map, position: map.getCenter(), content: el, zIndex: 20 });
+
+    gpsWatchId = navigator.geolocation.watchPosition(
+      onGpsPosition,
+      onGpsError,
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
+    );
+  }
+
+  function stopGps() {
+    if (gpsWatchId !== null) {
+      navigator.geolocation.clearWatch(gpsWatchId);
+      gpsWatchId = null;
+    }
+    if (gpsMarker) { gpsMarker.map = null; gpsMarker = null; }
+    if (gpsLine)   { gpsLine.setMap(null); gpsLine = null; }
+    gpsActive = false;
+    gpsPath = [];
+    gpsDistanceKm = 0;
+    gpsSpeed = 0;
+    gpsFollowing = true;
+  }
+
+  function onGpsPosition(pos) {
+    const pt = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    gpsSpeed = pos.coords.speed != null ? pos.coords.speed * 3.6 : 0; // m/s → km/h
+
+    // Jitter filter: ignore updates < 5m from last point
+    if (gpsPath.length > 0) {
+      const last = gpsPath[gpsPath.length - 1];
+      const dist = haversine(last, pt);
+      if (dist < 0.005) return; // 5m
+      gpsDistanceKm += dist;
+    }
+
+    gpsPath = [...gpsPath, pt];
+
+    // Update overlays
+    if (gpsMarker) gpsMarker.position = pt;
+    if (gpsLine)   gpsLine.setPath(gpsPath);
+
+    // Follow mode: center map on position
+    if (gpsFollowing && map) {
+      map.panTo(pt);
+      if (gpsPath.length === 1) map.setZoom(16);
+    }
+  }
+
+  function onGpsError(err) {
+    const msgs = {
+      1: 'Permiso de ubicación denegado.',
+      2: 'Ubicación no disponible.',
+      3: 'Tiempo de espera agotado.',
+    };
+    gpsError = msgs[err.code] || 'Error de GPS.';
+    stopGps();
+  }
+
+  async function redrawGpsOverlays() {
+    if (!map || gpsPath.length === 0) return;
+    const { Polyline } = await loader.importLibrary('maps');
+    const { AdvancedMarkerElement } = await loader.importLibrary('marker');
+
+    gpsLine = new Polyline({
+      path: [...gpsPath], strokeColor: '#4285f4', strokeWeight: 5, strokeOpacity: 0.8, map, zIndex: 5,
+    });
+    const el = document.createElement('div');
+    el.className = 'rv-gps-dot';
+    const lastPt = gpsPath[gpsPath.length - 1];
+    gpsMarker = new AdvancedMarkerElement({ map, position: lastPt, content: el, zIndex: 20 });
+  }
+
+  function recenterGps() {
+    if (gpsPath.length > 0 && map) {
+      gpsFollowing = true;
+      map.panTo(gpsPath[gpsPath.length - 1]);
+      map.setZoom(16);
+    }
+  }
+
   function clearVis() {
     stopAnim();
     if (bgLine)       { bgLine.setMap(null);       bgLine = null; }
@@ -361,6 +507,7 @@
   let fuelPct     = $derived(totalLitres > 0 ? (liveLitres / totalLitres) * 100 : 0);
   let distPct     = $derived(liveProgress * 100);
   let showHud     = $derived(animState === 'playing' || animState === 'paused' || animState === 'done');
+  let showGpsHud  = $derived(gpsActive && gpsPath.length > 0);
 
   // ── Mobile bottom sheet ───────────────────────────────────────────────────
   // 'hidden' (just the handle peeking) | 'compact' (form or result card) | 'full'
@@ -442,9 +589,17 @@
         <span class="handle-bar"></span>
       </div>
 
-      <!-- Compact result card: shown on mobile once a route is ready and the
-           sheet is collapsed. Drag up to expand for the full form. -->
-      {#if routeData}
+      <!-- GPS compact card -->
+      {#if gpsActive}
+        <div class="route-card">
+          <div class="card-fuel">
+            <span class="hud-gps-badge" style="margin-right: 0.375rem">GPS</span>
+            <span class="card-fuel-value">{fmtKm(gpsDistanceKm)}</span>
+            <span class="card-fuel-label">· {fmtL(gpsLitres)} · {fmtCLP(gpsCost)}</span>
+          </div>
+          <button class="card-play gps-stop-btn" onclick={stopGps}>⏹ Detener GPS</button>
+        </div>
+      {:else if routeData}
         <div class="route-card">
           <p class="card-route">{origin} → {destination}</p>
           <div class="card-fuel">
@@ -566,7 +721,65 @@
     <div class="map-wrap">
       <div bind:this={container} class="map"></div>
 
-      {#if showHud}
+      <!-- GPS controls -->
+      <button class="gps-btn" onclick={gpsActive ? stopGps : startGps}
+        class:active={gpsActive} title={gpsActive ? 'Detener GPS' : 'Iniciar GPS'}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>
+          <circle cx="12" cy="12" r="8"/>
+        </svg>
+      </button>
+
+      {#if gpsActive && !gpsFollowing}
+        <button class="gps-recenter" onclick={recenterGps} title="Re-centrar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      {/if}
+
+      {#if gpsError}
+        <div class="gps-error">{gpsError}</div>
+      {/if}
+
+      <!-- GPS HUD -->
+      {#if showGpsHud}
+        <div class="hud gps-hud">
+          <div class="hud-speed-row">
+            <div class="hud-speed-num">{Math.round(gpsSpeed)}</div>
+            <div class="hud-speed-meta">
+              <span class="hud-speed-unit">km/h</span>
+              <span class="hud-gps-badge">GPS</span>
+            </div>
+          </div>
+          <div class="hud-sep"></div>
+          <div class="hud-stat">
+            <div class="hud-stat-header">
+              <span class="hud-stat-label">Distancia</span>
+              <span class="hud-stat-values">
+                <strong>{fmtKm(gpsDistanceKm)}</strong>
+              </span>
+            </div>
+          </div>
+          <div class="hud-stat">
+            <div class="hud-stat-header">
+              <span class="hud-stat-label">Combustible</span>
+              <span class="hud-stat-values">
+                <strong>{fmtL(gpsLitres)}</strong>
+              </span>
+            </div>
+          </div>
+          <div class="hud-sep"></div>
+          <div class="hud-cost">
+            <span class="hud-cost-label">Gasto GPS</span>
+            <span class="hud-cost-val">{fmtCLP(gpsCost)}</span>
+          </div>
+        </div>
+      {/if}
+
+      {#if showHud && !showGpsHud}
         <div class="hud">
 
           <!-- Speed -->
@@ -811,6 +1024,56 @@
   }
   .hud-cost-total { font-size: .6875rem; color: #475569; }
 
+  /* ── GPS controls ── */
+  .gps-btn {
+    position: absolute; top: 12px; left: 60px;
+    z-index: 5;
+    width: 42px; height: 42px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface); color: var(--text-3);
+    border: 1px solid var(--border); border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    cursor: pointer; transition: all .15s;
+  }
+  .gps-btn:hover { background: var(--hover); }
+  .gps-btn.active {
+    background: #4285f4; color: #fff;
+    border-color: #4285f4;
+    box-shadow: 0 2px 12px rgba(66,133,244,.4);
+  }
+
+  .gps-recenter {
+    position: absolute; top: 62px; left: 60px;
+    z-index: 5;
+    width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface); color: var(--accent);
+    border: 1px solid var(--border); border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    cursor: pointer; transition: all .15s;
+  }
+  .gps-recenter:hover { background: var(--hover); }
+
+  .gps-error {
+    position: absolute; top: 12px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 5;
+    background: var(--danger-bg); color: var(--danger);
+    font-size: .75rem; font-weight: 500;
+    padding: .375rem .75rem; border-radius: .5rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,.12);
+  }
+
+  .gps-hud { bottom: auto; top: 60px; right: 20px; }
+
+  .hud-gps-badge {
+    font-size: .6875rem; font-weight: 600; color: #4285f4;
+    background: rgba(66,133,244,.12); padding: 2px 6px; border-radius: 999px;
+  }
+
+  .gps-stop-btn { background: #dc2626 !important; }
+  .gps-stop-btn:hover { background: #b91c1c !important; }
+
   /* ── Mobile (iPhone 16 Pro: 402px, Pro Max: 440px) ───────────────────── */
   @media (max-width: 768px) {
     header { display: none; }
@@ -953,5 +1216,13 @@
     .hud-cost-label { display: none; }
     .hud-cost-val { font-size: 0.875rem; }
     .hud-cost-total { display: none; }
+
+    /* GPS mobile overrides */
+    .gps-btn { left: 12px; top: 60px; }
+    .gps-recenter { left: 12px; top: 110px; }
+    .gps-hud {
+      top: 12px; right: 12px; left: auto; bottom: auto;
+    }
+    .gps-error { top: auto; bottom: 260px; }
   }
 </style>
