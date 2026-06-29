@@ -18,7 +18,9 @@
   let calcError      = $state('');
 
   let totalLitres = $derived(routeData && kmPerLitre > 0 ? routeData.totalDistanceKm / kmPerLitre : 0);
-  let totalCost   = $derived(totalLitres * fuelPriceCLP);
+  let fuelCost    = $derived(totalLitres * fuelPriceCLP);
+  let tollCost    = $derived(routeData?.tollCostCLP ?? 0);
+  let totalCost   = $derived(fuelCost + tollCost);
 
   // ── Animation state ───────────────────────────────────────────────────────
   // 'idle' | 'ready' | 'playing' | 'paused' | 'done'
@@ -191,6 +193,7 @@
             'routes.distanceMeters',
             'routes.duration',
             'routes.polyline.encodedPolyline',
+            'routes.travelAdvisory.tollInfo.estimatedPrice',
             'routes.legs.steps.distanceMeters',
             'routes.legs.steps.staticDuration',
             'routes.legs.steps.polyline.encodedPolyline',
@@ -201,6 +204,9 @@
           destination: { address: destination.trim() },
           travelMode: 'DRIVE',
           computeAlternativeRoutes: false,
+          // Pide a la API el detalle de peajes para la ruta.
+          extraComputations: ['TOLLS'],
+          routeModifiers: { vehicleInfo: { emissionType: 'GASOLINE' } },
         }),
       });
 
@@ -224,6 +230,7 @@
         totalDurationS:  parseInt(route.duration ?? '0'),
         points,
         encodedPolyline: route.polyline.encodedPolyline,
+        tollCostCLP: parseTollPrice(route),
       };
 
       await renderRouteOverlays();
@@ -488,6 +495,18 @@
     traveledPts = []; traveledIdx = 0;
   }
 
+  // La API de Routes devuelve los peajes como una lista de montos (Money) en
+  // travelAdvisory.tollInfo.estimatedPrice. Sumamos units + nanos por moneda.
+  // Asumimos una única moneda (CLP en Chile).
+  function parseTollPrice(route) {
+    const prices = route.travelAdvisory?.tollInfo?.estimatedPrice;
+    if (!prices?.length) return 0;
+    return prices.reduce(
+      (sum, m) => sum + parseInt(m.units ?? '0') + (m.nanos ?? 0) / 1e9,
+      0
+    );
+  }
+
   function handleKeydown(e) { if (e.key === 'Enter') calculateRoute(); }
 
   function fmtKm(n)  { return `${n.toFixed(1)} km`; }
@@ -567,10 +586,18 @@
     <aside
       class="panel"
       data-state={sheetState}
+      class:form-view={!routeData && !gpsActive}
       class:dragging={dragHeight !== null}
       style={dragHeight !== null ? `height: ${dragHeight}px` : ''}
       bind:this={sheetEl}
     >
+
+      <!-- Mobile-only intro: shown full-screen before a route is calculated,
+           so the parameter inputs get the whole viewport. -->
+      <div class="mobile-form-header">
+        <h2>Visualización de Ruta</h2>
+        <p>Calcula distancia, combustible y peajes de tu recorrido. Ingresa una ruta para ver el mapa.</p>
+      </div>
 
       <!-- Mobile-only drag handle. Drag up/down to resize the sheet. -->
       <div
@@ -673,8 +700,24 @@
               <span class="s-value">{fmtL(totalLitres)}</span>
             </div>
             <div class="summary-item">
-              <span class="s-label">Costo total</span>
-              <span class="s-value accent">{fmtCLP(totalCost)}</span>
+              <span class="s-label">Peajes</span>
+              <span class="s-value">{tollCost > 0 ? fmtCLP(tollCost) : 'Sin peajes'}</span>
+            </div>
+          </div>
+
+          <!-- Desglose de gastos: combustible + peajes = total -->
+          <div class="cost-box">
+            <div class="cost-row">
+              <span class="cost-label">Combustible</span>
+              <span class="cost-val">{fmtCLP(fuelCost)}</span>
+            </div>
+            <div class="cost-row">
+              <span class="cost-label">Peajes</span>
+              <span class="cost-val">{fmtCLP(tollCost)}</span>
+            </div>
+            <div class="cost-row cost-total">
+              <span class="cost-label">Costo total</span>
+              <span class="cost-val">{fmtCLP(totalCost)}</span>
             </div>
           </div>
         </section>
@@ -863,9 +906,10 @@
     transition: background 0.2s, border-color 0.2s;
   }
 
-  /* Mobile-only: drag handle + card are hidden on desktop. */
+  /* Mobile-only: drag handle + card + intro header are hidden on desktop. */
   .sheet-handle { display: none; }
   .route-card   { display: none; }
+  .mobile-form-header { display: none; }
   .section {
     padding: 1rem; border-bottom: 1px solid var(--border-2);
     display: flex; flex-direction: column; gap: .625rem;
@@ -918,6 +962,24 @@
     font-family: 'SF Mono', 'Fira Code', monospace;
   }
   .s-value.accent { color: var(--accent-text); }
+
+  /* Desglose de gastos (combustible + peajes = total) */
+  .cost-box {
+    margin-top: .125rem; padding: .625rem .75rem;
+    background: var(--subtle); border: 1px solid var(--border-2); border-radius: .625rem;
+    display: flex; flex-direction: column; gap: .375rem;
+  }
+  .cost-row { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
+  .cost-label { font-size: .8125rem; color: var(--text-2); }
+  .cost-val {
+    font-size: .8125rem; font-weight: 600; color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .cost-total {
+    margin-top: .125rem; padding-top: .5rem; border-top: 1px solid var(--border);
+  }
+  .cost-total .cost-label { font-size: .875rem; font-weight: 600; color: var(--text); }
+  .cost-total .cost-val { font-size: 1rem; color: var(--accent-text); }
 
   .play-row { display: flex; gap: .5rem; }
   .btn-play {
@@ -1101,6 +1163,39 @@
     .panel[data-state="full"]    { height: 80vh; overflow-y: auto; }
     .panel.dragging { transition: none; overflow: hidden; }
 
+    /* ── Full-viewport form (before a route exists) ───────── */
+    /* The parameter inputs take the whole screen; the map stays
+       hidden behind until the user calculates a route. */
+    .panel.form-view {
+      inset: 0;
+      width: 100%;
+      height: 100% !important;
+      max-height: none;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
+      overflow-y: auto;
+      z-index: 20;
+      padding: max(1rem, env(safe-area-inset-top)) 0 1.5rem;
+    }
+    .panel.form-view .sheet-handle { display: none; }
+    /* Override the compact-mode section hiding: in the full form view all
+       parameter sections must stay visible. */
+    .panel.form-view[data-state="compact"] .section ~ .section { display: flex; }
+
+    .mobile-form-header {
+      display: block;
+      padding: .5rem 1.25rem 1rem;
+    }
+    .mobile-form-header h2 {
+      margin: 0 0 .375rem; font-size: 1.375rem; font-weight: 700; color: var(--text);
+    }
+    .mobile-form-header p {
+      margin: 0; font-size: .875rem; line-height: 1.5; color: var(--text-3);
+    }
+    /* Only show the intro inside the full-screen form view. */
+    .panel:not(.form-view) .mobile-form-header { display: none; }
+
     /* Drag handle */
     .sheet-handle {
       display: flex;
@@ -1185,6 +1280,9 @@
     }
 
     .section { padding: 0.75rem 1rem; }
+
+    /* Avoid iOS auto-zoom on input focus. */
+    .field input { font-size: 16px; }
 
     /* ── HUD: compact data-only chip at top-right ─────────── */
     .hud {

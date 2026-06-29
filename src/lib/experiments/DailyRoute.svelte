@@ -16,6 +16,20 @@
   let loading   = $state(false);
   let formError = $state('');
 
+  // ── Editar viaje ──────────────────────────────────────────────────────────
+  let editingId   = $state(null);
+  let editOrigin  = $state('');
+  let editDest    = $state('');
+  let editLoading = $state(false);
+  let editError   = $state('');
+
+  // ── Lugares guardados (persistidos en localStorage) ───────────────────────
+  const PLACES_KEY = 'dr-saved-places';
+  let savedPlaces     = $state([]); // { id, label, address }
+  let newPlaceLabel   = $state('');
+  let newPlaceAddress = $state('');
+  let showPlaceForm   = $state(false);
+
   // ── Viajes ────────────────────────────────────────────────────────────────
   // Each trip: { id, origin, destination, distanceKm, durationText,
   //              encodedPolyline, path, polyline, color,
@@ -117,6 +131,7 @@
   const COLORS = ['#4f46e5','#059669','#d97706','#dc2626','#7c3aed','#0891b2','#db2777','#92400e'];
 
   onMount(async () => {
+    loadPlaces();
     const { Map } = await loader.importLibrary('maps');
     MapClass = Map;
     buildMap({ lat: -36.8197, lng: -73.0521 }, 12);
@@ -237,49 +252,60 @@
   }
 
   // ── Agregar viaje ─────────────────────────────────────────────────────────
+  // Pide la ruta a la API de Directions y devuelve los datos ya procesados.
+  // Reutilizado por addTrip() y saveEdit().
+  async function requestRoute(origin, dest) {
+    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': PUBLIC_GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask': [
+          'routes.distanceMeters',
+          'routes.duration',
+          'routes.polyline.encodedPolyline',
+          'routes.legs.steps.distanceMeters',
+          'routes.legs.steps.staticDuration',
+          'routes.legs.steps.polyline.encodedPolyline',
+        ].join(','),
+      },
+      body: JSON.stringify({
+        origin: { address: origin },
+        destination: { address: dest },
+        travelMode: 'DRIVE',
+        computeAlternativeRoutes: false,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.routes?.length) {
+      throw new Error(data.error?.message ?? 'No se encontró ruta entre estos dos lugares.');
+    }
+
+    const route = data.routes[0];
+    const steps = route.legs?.[0]?.steps ?? [];
+    const { encoding } = await loader.importLibrary('geometry');
+
+    return {
+      distanceKm: route.distanceMeters / 1000,
+      durationText: parseDuration(route.duration),
+      encodedPolyline: route.polyline.encodedPolyline,
+      path: encoding.decodePath(route.polyline.encodedPolyline),
+      timeline: buildTimeline(steps, encoding),
+    };
+  }
+
   async function addTrip() {
     if (!originInput.trim() || !destinationInput.trim()) return;
     loading = true;
     formError = '';
 
     try {
-      const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': PUBLIC_GOOGLE_MAPS_API_KEY,
-          'X-Goog-FieldMask': [
-            'routes.distanceMeters',
-            'routes.duration',
-            'routes.polyline.encodedPolyline',
-            'routes.legs.steps.distanceMeters',
-            'routes.legs.steps.staticDuration',
-            'routes.legs.steps.polyline.encodedPolyline',
-          ].join(','),
-        },
-        body: JSON.stringify({
-          origin: { address: originInput.trim() },
-          destination: { address: destinationInput.trim() },
-          travelMode: 'DRIVE',
-          computeAlternativeRoutes: false,
-        }),
-      });
+      const info = await requestRoute(originInput.trim(), destinationInput.trim());
+      const { Polyline } = await loader.importLibrary('maps');
 
-      const data = await res.json();
-      if (!res.ok || !data.routes?.length) {
-        throw new Error(data.error?.message ?? 'No se encontró ruta entre estos dos lugares.');
-      }
-
-      const route = data.routes[0];
-      const steps = route.legs?.[0]?.steps ?? [];
-
-      const { encoding } = await loader.importLibrary('geometry');
-      const { Polyline }  = await loader.importLibrary('maps');
-
-      const path     = encoding.decodePath(route.polyline.encodedPolyline);
       const color    = COLORS[trips.length % COLORS.length];
-      const polyline = new Polyline({ path, strokeColor: color, strokeWeight: 5, strokeOpacity: 0.85, map });
-      const timeline = buildTimeline(steps, encoding);
+      const polyline = new Polyline({ path: info.path, strokeColor: color, strokeWeight: 5, strokeOpacity: 0.85, map });
 
       trips = [
         ...trips,
@@ -287,13 +313,9 @@
           id: Date.now(),
           origin: originInput.trim(),
           destination: destinationInput.trim(),
-          distanceKm: route.distanceMeters / 1000,
-          durationText: parseDuration(route.duration),
-          encodedPolyline: route.polyline.encodedPolyline,
-          path,
+          ...info,
           polyline,
           color,
-          timeline,
         },
       ];
 
@@ -308,6 +330,83 @@
     } finally {
       loading = false;
     }
+  }
+
+  // ── Editar viaje ──────────────────────────────────────────────────────────
+  function startEdit(trip) {
+    editingId  = trip.id;
+    editOrigin = trip.origin;
+    editDest   = trip.destination;
+    editError  = '';
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    editError = '';
+  }
+
+  async function saveEdit(id) {
+    const origin = editOrigin.trim();
+    const dest   = editDest.trim();
+    if (!origin || !dest) return;
+    editLoading = true;
+    editError   = '';
+
+    try {
+      const info = await requestRoute(origin, dest);
+      const trip = trips.find((t) => t.id === id);
+      if (!trip) return;
+
+      // Replace the old polyline on the map, keeping the trip's color/id.
+      trip.polyline.setMap(null);
+      const { Polyline } = await loader.importLibrary('maps');
+      const polyline = new Polyline({ path: info.path, strokeColor: trip.color, strokeWeight: 5, strokeOpacity: 0.85, map });
+
+      // Geometry changed — clear any running visualization so it doesn't
+      // reference stale paths.
+      resetViz();
+
+      trips = trips.map((t) =>
+        t.id === id ? { ...t, origin, destination: dest, ...info, polyline } : t
+      );
+
+      editingId = null;
+      fitAll(trips);
+    } catch (e) {
+      editError = e.message;
+    } finally {
+      editLoading = false;
+    }
+  }
+
+  // ── Lugares guardados ─────────────────────────────────────────────────────
+  function loadPlaces() {
+    try {
+      const raw = localStorage.getItem(PLACES_KEY);
+      if (raw) savedPlaces = JSON.parse(raw);
+    } catch { /* ignore corrupt/unavailable storage */ }
+  }
+
+  function persistPlaces() {
+    try {
+      localStorage.setItem(PLACES_KEY, JSON.stringify(savedPlaces));
+    } catch { /* ignore */ }
+  }
+
+  function addPlace() {
+    const label   = newPlaceLabel.trim();
+    const address = newPlaceAddress.trim();
+    if (!label || !address) return;
+    savedPlaces = [...savedPlaces, { id: Date.now(), label, address }];
+    persistPlaces();
+    newPlaceLabel   = '';
+    newPlaceAddress = '';
+    showPlaceForm   = false;
+  }
+
+  function removePlace(id) {
+    savedPlaces = savedPlaces.filter((p) => p.id !== id);
+    persistPlaces();
   }
 
   function buildTimeline(steps, encoding) {
@@ -787,7 +886,225 @@
   function handleCmpKeydown(side) {
     return (e) => { if (e.key === 'Enter') calcCmpRoute(side); };
   }
+
+  // ── Optimizar ruta ──────────────────────────────────────────────────────────
+  let optimizeMode     = $state(false);
+  let optStart         = $state('');
+  let optStops         = $state([]);     // { id, address }
+  let optStopInput     = $state('');
+  let optReturnToStart = $state(true);
+  let optEnd           = $state('');
+  let optLoading       = $state(false);
+  let optError         = $state('');
+  // optResult: { order:[{label,address}], distanceKm, durationText,
+  //              originalDistanceKm, savedKm, encodedPolyline, positions }
+  let optResult        = $state(null);
+
+  let optContainer;
+  let optMap    = null;
+  let optScheme = null;
+
+  let optLitres      = $derived(optResult && kmPerLitre > 0 ? optResult.distanceKm / kmPerLitre : 0);
+  let optCost        = $derived(optLitres * fuelPriceCLP);
+  let optSavedLitres = $derived(optResult && optResult.savedKm > 0 && kmPerLitre > 0 ? optResult.savedKm / kmPerLitre : 0);
+  let optSavedCost   = $derived(optSavedLitres * fuelPriceCLP);
+
+  function enterOptimize() {
+    optimizeMode = true;
+    sidebarWasCollapsed = sidebar.collapsed;
+    sidebar.collapse();
+    requestAnimationFrame(() => buildOptMap());
+  }
+
+  function exitOptimize() {
+    optimizeMode = false;
+    if (!sidebarWasCollapsed) sidebar.expand();
+    optMap = null; optScheme = null;
+  }
+
+  function buildOptMap() {
+    const scheme = theme.isDark ? 'DARK' : 'LIGHT';
+    if (!optContainer || !MapClass) return;
+    optContainer.innerHTML = '';
+    optMap = new MapClass(optContainer, {
+      center: { lat: -36.8197, lng: -73.0521 },
+      zoom: 12, mapId: PUBLIC_GOOGLE_MAP_ID, colorScheme: scheme, mapTypeControl: false,
+    });
+    optScheme = scheme;
+  }
+
+  // Rebuild the optimizer map on theme change and redraw the result.
+  $effect(() => {
+    if (!optimizeMode || !MapClass) return;
+    const scheme = theme.isDark ? 'DARK' : 'LIGHT';
+    if (optScheme !== scheme) {
+      buildOptMap();
+      if (optResult) renderOptOverlay();
+    }
+  });
+
+  function addOptStop() {
+    const address = optStopInput.trim();
+    if (!address) return;
+    optStops = [...optStops, { id: Date.now(), address }];
+    optStopInput = '';
+  }
+
+  function removeOptStop(id) {
+    optStops = optStops.filter((s) => s.id !== id);
+  }
+
+  // Seed the optimizer from places already used in the day's trips,
+  // in first-appearance order (deduped, case-insensitive).
+  function seedFromTrips() {
+    const seen = new Set();
+    const uniques = [];
+    for (const t of trips) {
+      for (const addr of [t.origin, t.destination]) {
+        const key = addr.trim().toLowerCase();
+        if (key && !seen.has(key)) { seen.add(key); uniques.push(addr); }
+      }
+    }
+    if (!uniques.length) return;
+    optStart = uniques[0];
+    optStops = uniques.slice(1).map((address, i) => ({ id: Date.now() + i, address }));
+    optResult = null;
+  }
+
+  async function requestWaypointRoute(origin, destination, intermediates, optimize) {
+    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': PUBLIC_GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask': [
+          'routes.distanceMeters',
+          'routes.duration',
+          'routes.polyline.encodedPolyline',
+          'routes.optimizedIntermediateWaypointIndex',
+          'routes.legs.startLocation.latLng',
+          'routes.legs.endLocation.latLng',
+        ].join(','),
+      },
+      body: JSON.stringify({
+        origin: { address: origin },
+        destination: { address: destination },
+        intermediates: intermediates.map((address) => ({ address })),
+        travelMode: 'DRIVE',
+        optimizeWaypointOrder: optimize,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.routes?.length) {
+      throw new Error(data.error?.message ?? 'No se pudo calcular la ruta. Revisa las direcciones.');
+    }
+    const route = data.routes[0];
+    return {
+      distanceKm: route.distanceMeters / 1000,
+      duration: route.duration,
+      encodedPolyline: route.polyline.encodedPolyline,
+      legs: route.legs ?? [],
+      optimizedIndex: route.optimizedIntermediateWaypointIndex
+        ?? intermediates.map((_, i) => i),
+    };
+  }
+
+  async function optimizeRoute() {
+    const start = optStart.trim();
+    const stops = optStops.map((s) => s.address.trim()).filter(Boolean);
+    const end   = optReturnToStart ? start : optEnd.trim();
+    if (!start || !end || stops.length < 1) {
+      optError = 'Indica un inicio, un fin y al menos una parada.';
+      return;
+    }
+    optLoading = true;
+    optError   = '';
+
+    try {
+      // Optimized order + the entered order (for the savings comparison).
+      const opt  = await requestWaypointRoute(start, end, stops, true);
+      const orig = await requestWaypointRoute(start, end, stops, false);
+
+      const orderedStops = opt.optimizedIndex.map((idx) => stops[idx]);
+      const order = [
+        { label: 'Inicio', address: start },
+        ...orderedStops.map((address, i) => ({ label: `Parada ${i + 1}`, address })),
+        { label: optReturnToStart ? 'Regreso al inicio' : 'Fin', address: end },
+      ];
+
+      // Marker positions come from the leg endpoints (already in optimized order).
+      const positions = [];
+      if (opt.legs.length) {
+        const s = opt.legs[0].startLocation?.latLng;
+        if (s) positions.push({ lat: s.latitude, lng: s.longitude, kind: 'start' });
+        opt.legs.forEach((leg, i) => {
+          const e = leg.endLocation?.latLng;
+          if (e) positions.push({
+            lat: e.latitude, lng: e.longitude,
+            kind: i === opt.legs.length - 1 ? 'end' : 'mid', n: i + 1,
+          });
+        });
+      }
+
+      optResult = {
+        order,
+        distanceKm: opt.distanceKm,
+        durationText: parseDuration(opt.duration),
+        originalDistanceKm: orig.distanceKm,
+        savedKm: orig.distanceKm - opt.distanceKm,
+        encodedPolyline: opt.encodedPolyline,
+        positions,
+      };
+
+      buildOptMap();
+      await renderOptOverlay();
+    } catch (e) {
+      optError = e.message;
+    } finally {
+      optLoading = false;
+    }
+  }
+
+  async function renderOptOverlay() {
+    if (!optMap || !optResult) return;
+    const { encoding }     = await loader.importLibrary('geometry');
+    const { Polyline }     = await loader.importLibrary('maps');
+    const { LatLngBounds } = await loader.importLibrary('core');
+    const { AdvancedMarkerElement } = await loader.importLibrary('marker');
+
+    const path = encoding.decodePath(optResult.encodedPolyline);
+    new Polyline({ path, strokeColor: '#4f46e5', strokeWeight: 5, strokeOpacity: 0.9, map: optMap });
+
+    for (const p of optResult.positions) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'display:flex;align-items:center;justify-content:center;width:24px;height:24px;' +
+        'border-radius:50%;font:700 11px/1 system-ui,sans-serif;color:#fff;' +
+        'border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);';
+      el.style.background = p.kind === 'start' ? '#059669' : p.kind === 'end' ? '#dc2626' : '#4f46e5';
+      el.textContent = p.kind === 'start' ? 'A' : p.kind === 'end' ? 'B' : String(p.n);
+      new AdvancedMarkerElement({ map: optMap, position: { lat: p.lat, lng: p.lng }, content: el });
+    }
+
+    const bounds = new LatLngBounds();
+    path.forEach((pt) => bounds.extend(pt));
+    optMap.fitBounds(bounds, 56);
+  }
 </script>
+
+<!-- Chips de lugares guardados; `set` recibe la dirección elegida. -->
+{#snippet placeChips(set)}
+  {#if savedPlaces.length > 0}
+    <div class="place-chips">
+      {#each savedPlaces as place (place.id)}
+        <button type="button" class="place-chip" onclick={() => set(place.address)} title={place.address}>
+          📍 {place.label}
+        </button>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 <div class="experiment">
   <header>
@@ -796,15 +1113,21 @@
       <p>Suma varios viajes del día y visualiza el recorrido con contador de combustible en tiempo real.</p>
     </div>
     <div class="header-actions">
-      {#if !compareMode}
+      {#if !compareMode && !optimizeMode}
+        <button class="btn-compare" onclick={enterOptimize}>
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path fill-rule="evenodd" d="M3 5a1 1 0 011-1h7.586L9.293 1.707A1 1 0 0110.707.293l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L11.586 6H4a1 1 0 01-1-1zm14 10a1 1 0 01-1 1H8.414l2.293 2.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L8.414 14H16a1 1 0 011 1z" clip-rule="evenodd"/></svg>
+          Optimizar ruta
+        </button>
         <button class="btn-compare" onclick={enterCompare}>
           <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M9 2a1 1 0 00-1 1v14a1 1 0 102 0V3a1 1 0 00-1-1zM3 8a1 1 0 011-1h2a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h2a1 1 0 110 2H4a1 1 0 01-1-1zm10-4a1 1 0 011-1h2a1 1 0 110 2h-2a1 1 0 01-1-1zm0 4a1 1 0 011-1h2a1 1 0 110 2h-2a1 1 0 01-1-1z"/></svg>
           Comparar rutas
         </button>
-      {:else}
+      {:else if compareMode}
         <button class="btn-clear" onclick={exitCompare}>Salir comparación</button>
+      {:else}
+        <button class="btn-clear" onclick={exitOptimize}>Salir optimizador</button>
       {/if}
-      {#if trips.length > 0 && !compareMode}
+      {#if trips.length > 0 && !compareMode && !optimizeMode}
         <button class="btn-pdf" onclick={generatePDF} disabled={pdfLoading}>
           {#if pdfLoading}
             <span class="spinner-sm"></span> Generando…
@@ -818,7 +1141,118 @@
     </div>
   </header>
 
-  {#if compareMode}
+  {#if optimizeMode}
+  <div class="optimize-body">
+    <aside class="opt-panel">
+      <div class="opt-intro">
+        <div class="opt-intro-text">
+          <p class="opt-intro-title">Orden más eficiente</p>
+          <p class="opt-intro-sub">Define un inicio, las paradas y el fin. Calculamos el orden que menos kilómetros recorre.</p>
+        </div>
+        <button class="opt-exit-mobile" onclick={exitOptimize} aria-label="Salir del optimizador">×</button>
+      </div>
+
+      <section class="section">
+        <label class="field">
+          <span>Inicio</span>
+          <input type="text" placeholder="Punto de partida" bind:value={optStart} />
+        </label>
+        {@render placeChips((a) => optStart = a)}
+      </section>
+
+      <section class="section">
+        <p class="section-title">Paradas a visitar</p>
+        {#if optStops.length > 0}
+          <ul class="opt-stops">
+            {#each optStops as stop, i (stop.id)}
+              <li class="opt-stop">
+                <span class="opt-stop-num">{i + 1}</span>
+                <span class="opt-stop-addr">{stop.address}</span>
+                <button class="btn-remove" onclick={() => removeOptStop(stop.id)} aria-label="Quitar parada">×</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <div class="opt-add-row">
+          <input
+            type="text"
+            placeholder="Agregar parada"
+            bind:value={optStopInput}
+            onkeydown={(e) => e.key === 'Enter' && addOptStop()}
+          />
+          <button class="btn-add opt-add-btn" onclick={addOptStop} disabled={!optStopInput}>+</button>
+        </div>
+        {@render placeChips((a) => optStopInput = a)}
+        {#if trips.length > 0}
+          <button class="btn-seed" onclick={seedFromTrips}>↺ Usar lugares de mis viajes</button>
+        {/if}
+      </section>
+
+      <section class="section">
+        <p class="section-title">Fin</p>
+        <label class="opt-radio">
+          <input type="radio" name="opt-end" checked={optReturnToStart} onchange={() => optReturnToStart = true} />
+          <span>Volver al inicio (ida y vuelta)</span>
+        </label>
+        <label class="opt-radio">
+          <input type="radio" name="opt-end" checked={!optReturnToStart} onchange={() => optReturnToStart = false} />
+          <span>Terminar en otro lugar</span>
+        </label>
+        {#if !optReturnToStart}
+          <input class="opt-end-input" type="text" placeholder="Punto final" bind:value={optEnd} />
+          {@render placeChips((a) => optEnd = a)}
+        {/if}
+      </section>
+
+      <section class="section">
+        <button
+          class="btn-add"
+          onclick={optimizeRoute}
+          disabled={optLoading || !optStart || optStops.length < 1 || (!optReturnToStart && !optEnd)}
+        >
+          {#if optLoading}<span class="spinner"></span> Optimizando…{:else}Optimizar ruta{/if}
+        </button>
+        {#if optError}<p class="error">{optError}</p>{/if}
+      </section>
+
+      {#if optResult}
+        <section class="section">
+          <p class="section-title">Orden óptimo</p>
+          <ol class="opt-order">
+            {#each optResult.order as step, i (step.label + step.address)}
+              <li class="opt-order-item">
+                <span class="opt-order-badge" class:start={i === 0} class:end={i === optResult.order.length - 1}>
+                  {i === 0 ? 'A' : i === optResult.order.length - 1 ? 'B' : i}
+                </span>
+                <div class="opt-order-text">
+                  <span class="opt-order-label">{step.label}</span>
+                  <span class="opt-order-addr">{step.address}</span>
+                </div>
+              </li>
+            {/each}
+          </ol>
+        </section>
+
+        <section class="section total-section">
+          <p class="section-title">Resumen</p>
+          <div class="result-row"><span>Distancia óptima</span><strong>{fmtKm(optResult.distanceKm)}</strong></div>
+          <div class="result-row"><span>Tiempo estimado</span><strong>{optResult.durationText}</strong></div>
+          <div class="result-row"><span>Combustible</span><strong>{fmtL(optLitres)}</strong></div>
+          <div class="result-row grand-total"><span>Costo</span><strong>{fmtCLP(optCost)}</strong></div>
+          {#if optResult.savedKm > 0.05}
+            <div class="opt-savings">
+              Ahorras <strong>{fmtKm(optResult.savedKm)}</strong> ({fmtCLP(optSavedCost)}) frente al orden ingresado, que recorría {fmtKm(optResult.originalDistanceKm)}.
+            </div>
+          {:else}
+            <div class="opt-savings neutral">El orden que ingresaste ya era el más eficiente.</div>
+          {/if}
+        </section>
+      {/if}
+    </aside>
+
+    <div class="opt-map" bind:this={optContainer}></div>
+  </div>
+  {:else if compareMode}
   <div class="compare-body">
     <!-- Route A -->
     <div class="cmp-side">
@@ -971,10 +1405,12 @@
           <span>Desde</span>
           <input type="text" placeholder="Dirección de origen" bind:value={originInput} onkeydown={handleKeydown} />
         </label>
+        {@render placeChips((a) => originInput = a)}
         <label class="field">
           <span>Hasta</span>
           <input type="text" placeholder="Dirección de destino" bind:value={destinationInput} onkeydown={handleKeydown} />
         </label>
+        {@render placeChips((a) => destinationInput = a)}
         <button class="btn-add" onclick={addTrip} disabled={loading || !originInput || !destinationInput}>
           {#if loading}
             <span class="spinner"></span> Calculando…
@@ -983,6 +1419,48 @@
           {/if}
         </button>
         {#if formError}<p class="error">{formError}</p>{/if}
+      </section>
+
+      <!-- Lugares guardados -->
+      <section class="section section-places">
+        <div class="section-head">
+          <p class="section-title">Lugares guardados</p>
+          <button class="btn-mini" onclick={() => showPlaceForm = !showPlaceForm}>
+            {showPlaceForm ? 'Cancelar' : '+ Nuevo'}
+          </button>
+        </div>
+
+        {#if showPlaceForm}
+          <div class="place-form">
+            <input type="text" placeholder="Nombre (Casa, Colegio, Jardín…)" bind:value={newPlaceLabel} />
+            <input
+              type="text"
+              placeholder="Dirección"
+              bind:value={newPlaceAddress}
+              onkeydown={(e) => e.key === 'Enter' && addPlace()}
+            />
+            <button class="btn-add" onclick={addPlace} disabled={!newPlaceLabel || !newPlaceAddress}>
+              Guardar lugar
+            </button>
+          </div>
+        {/if}
+
+        {#if savedPlaces.length > 0}
+          <ul class="saved-list">
+            {#each savedPlaces as place (place.id)}
+              <li class="saved-item">
+                <span class="saved-icon">📍</span>
+                <div class="saved-text">
+                  <span class="saved-label">{place.label}</span>
+                  <span class="saved-address">{place.address}</span>
+                </div>
+                <button class="btn-remove" onclick={() => removePlace(place.id)} aria-label="Eliminar lugar">×</button>
+              </li>
+            {/each}
+          </ul>
+        {:else if !showPlaceForm}
+          <p class="places-hint">Guarda lugares frecuentes (casa, colegio, jardín…) para reutilizarlos al crear viajes.</p>
+        {/if}
       </section>
 
       <!-- Lista de viajes -->
@@ -994,13 +1472,45 @@
               <li class="trip-item">
                 <span class="trip-dot" style="background: {trip.color}"></span>
                 <div class="trip-body">
-                  <div class="trip-header-row">
-                    <span class="trip-name">Viaje {i + 1}</span>
-                    <span class="trip-cost">{fmtCLP(trip.cost)}</span>
-                    <button class="btn-remove" onclick={() => removeTrip(trip.id)} aria-label="Eliminar viaje">×</button>
-                  </div>
-                  <span class="trip-route">{trip.origin} → {trip.destination}</span>
-                  <span class="trip-meta">{fmtKm(trip.distanceKm)} · {trip.durationText} · {fmtL(trip.litres)}</span>
+                  {#if editingId === trip.id}
+                    <div class="trip-edit">
+                      <span class="trip-name">Editar viaje {i + 1}</span>
+                      <input
+                        type="text"
+                        placeholder="Desde"
+                        bind:value={editOrigin}
+                        onkeydown={(e) => e.key === 'Enter' && saveEdit(trip.id)}
+                      />
+                      {@render placeChips((a) => editOrigin = a)}
+                      <input
+                        type="text"
+                        placeholder="Hasta"
+                        bind:value={editDest}
+                        onkeydown={(e) => e.key === 'Enter' && saveEdit(trip.id)}
+                      />
+                      {@render placeChips((a) => editDest = a)}
+                      <div class="trip-edit-actions">
+                        <button
+                          class="btn-save-edit"
+                          onclick={() => saveEdit(trip.id)}
+                          disabled={editLoading || !editOrigin || !editDest}
+                        >
+                          {#if editLoading}<span class="spinner"></span> Guardando…{:else}Guardar{/if}
+                        </button>
+                        <button class="btn-cancel-edit" onclick={cancelEdit}>Cancelar</button>
+                      </div>
+                      {#if editError}<p class="error">{editError}</p>{/if}
+                    </div>
+                  {:else}
+                    <div class="trip-header-row">
+                      <span class="trip-name">Viaje {i + 1}</span>
+                      <span class="trip-cost">{fmtCLP(trip.cost)}</span>
+                      <button class="btn-edit" onclick={() => startEdit(trip)} aria-label="Editar viaje">✎</button>
+                      <button class="btn-remove" onclick={() => removeTrip(trip.id)} aria-label="Eliminar viaje">×</button>
+                    </div>
+                    <span class="trip-route">{trip.origin} → {trip.destination}</span>
+                    <span class="trip-meta">{fmtKm(trip.distanceKm)} · {trip.durationText} · {fmtL(trip.litres)}</span>
+                  {/if}
                 </div>
               </li>
             {/each}
@@ -1205,6 +1715,68 @@
   .trip-route { font-size: .75rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .trip-meta  { font-size: .6875rem; color: var(--text-4); }
 
+  .btn-edit {
+    background: none; border: none; cursor: pointer; color: var(--text-4);
+    font-size: .8125rem; line-height: 1; padding: 0 2px; border-radius: .25rem; flex-shrink: 0;
+  }
+  .btn-edit:hover { color: var(--accent-text); background: var(--accent-bg); }
+
+  /* Inline trip editor */
+  .trip-edit { display: flex; flex-direction: column; gap: .375rem; }
+  .trip-edit input {
+    width: 100%; padding: .375rem .5rem; border: 1px solid var(--input-border); border-radius: .375rem;
+    font-size: .8125rem; color: var(--text); background: var(--input-bg); outline: none; transition: border-color .15s;
+  }
+  .trip-edit input:focus { border-color: var(--accent); }
+  .trip-edit-actions { display: flex; gap: .375rem; margin-top: .125rem; }
+  .btn-save-edit {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: .375rem;
+    padding: .375rem; background: var(--accent); color: #fff; border: none; border-radius: .375rem;
+    font-size: .8125rem; font-weight: 500; cursor: pointer; transition: background .15s;
+  }
+  .btn-save-edit:hover:not(:disabled) { background: var(--accent-h); }
+  .btn-save-edit:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-cancel-edit {
+    padding: .375rem .75rem; background: var(--hover); color: var(--text-3);
+    border: none; border-radius: .375rem; font-size: .8125rem; cursor: pointer;
+  }
+  .btn-cancel-edit:hover { background: var(--border); }
+
+  /* Quick-pick chips for saved places */
+  .place-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -.25rem; }
+  .place-chip {
+    padding: .25rem .5rem; background: var(--subtle); color: var(--text-2);
+    border: 1px solid var(--border-2); border-radius: 999px; font-size: .6875rem; font-weight: 500;
+    cursor: pointer; white-space: nowrap; transition: all .1s;
+  }
+  .place-chip:hover { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-border); }
+
+  /* Saved places section */
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+  .btn-mini {
+    padding: .1875rem .5rem; background: var(--hover); color: var(--text-3);
+    border: 1px solid var(--border); border-radius: .375rem; font-size: .6875rem; font-weight: 500; cursor: pointer; transition: all .1s;
+  }
+  .btn-mini:hover { background: var(--border); color: var(--text-2); }
+
+  .place-form { display: flex; flex-direction: column; gap: .375rem; }
+  .place-form input {
+    width: 100%; padding: .4375rem .625rem; border: 1px solid var(--input-border); border-radius: .5rem;
+    font-size: .875rem; color: var(--text); background: var(--input-bg); outline: none; transition: border-color .15s;
+  }
+  .place-form input:focus { border-color: var(--accent); }
+
+  .saved-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .saved-item {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .4375rem .5rem; background: var(--subtle); border: 1px solid var(--border-2); border-radius: .5rem;
+  }
+  .saved-icon { font-size: .8125rem; flex-shrink: 0; }
+  .saved-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .saved-label { font-size: .8125rem; font-weight: 600; color: var(--text); }
+  .saved-address { font-size: .6875rem; color: var(--text-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .places-hint { margin: 0; font-size: .75rem; color: var(--text-4); line-height: 1.5; }
+
   .total-section { background: var(--subtle); }
   .result-row { display: flex; justify-content: space-between; align-items: baseline; font-size: .875rem; color: var(--text-2); }
   .result-row strong { font-weight: 600; color: var(--text); font-family: 'SF Mono','Fira Code',monospace; font-size: .8125rem; }
@@ -1365,6 +1937,79 @@
   .cmp-summary strong {
     color: #a5b4fc; font-family: 'SF Mono', 'Fira Code', monospace;
   }
+
+  /* ── Optimizar ruta ── */
+  .optimize-body { flex: 1; display: flex; overflow: hidden; }
+  .opt-panel {
+    width: 320px; flex-shrink: 0; border-right: 1px solid var(--border);
+    background: var(--surface); overflow-y: auto; display: flex; flex-direction: column;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .opt-map { flex: 1; min-width: 0; }
+
+  .opt-intro { display: flex; align-items: flex-start; gap: .5rem; padding: 1rem 1rem .75rem; border-bottom: 1px solid var(--border-2); }
+  .opt-intro-text { flex: 1; min-width: 0; }
+  .opt-intro-title { margin: 0 0 .125rem; font-size: .875rem; font-weight: 600; color: var(--text); }
+  .opt-intro-sub { margin: 0; font-size: .75rem; color: var(--text-3); line-height: 1.5; }
+  .opt-exit-mobile {
+    display: none; flex-shrink: 0; width: 28px; height: 28px; align-items: center; justify-content: center;
+    background: var(--hover); border: 1px solid var(--border); border-radius: .5rem;
+    color: var(--text-3); font-size: 1.125rem; line-height: 1; cursor: pointer;
+  }
+
+  .opt-stops { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .opt-stop {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .375rem .5rem; background: var(--subtle); border: 1px solid var(--border-2); border-radius: .5rem;
+  }
+  .opt-stop-num {
+    flex-shrink: 0; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+    background: var(--accent-bg); color: var(--accent-text); border-radius: 50%;
+    font-size: .6875rem; font-weight: 700;
+  }
+  .opt-stop-addr { flex: 1; min-width: 0; font-size: .8125rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .opt-add-row { display: flex; gap: .375rem; }
+  .opt-add-row input {
+    flex: 1; min-width: 0; padding: .4375rem .625rem; border: 1px solid var(--input-border); border-radius: .5rem;
+    font-size: .875rem; color: var(--text); background: var(--input-bg); outline: none; transition: border-color .15s;
+  }
+  .opt-add-row input:focus { border-color: var(--accent); }
+  .opt-add-btn { width: auto !important; flex-shrink: 0; padding: 0 .875rem !important; font-size: 1.125rem !important; }
+
+  .btn-seed {
+    margin-top: .125rem; padding: .375rem .625rem; background: var(--hover); color: var(--text-2);
+    border: 1px solid var(--border); border-radius: .5rem; font-size: .75rem; font-weight: 500;
+    cursor: pointer; transition: all .1s;
+  }
+  .btn-seed:hover { background: var(--border); color: var(--text); }
+
+  .opt-radio { display: flex; align-items: center; gap: .5rem; font-size: .8125rem; color: var(--text-2); cursor: pointer; }
+  .opt-radio input { accent-color: var(--accent); cursor: pointer; }
+  .opt-end-input {
+    width: 100%; padding: .4375rem .625rem; border: 1px solid var(--input-border); border-radius: .5rem;
+    font-size: .875rem; color: var(--text); background: var(--input-bg); outline: none; transition: border-color .15s;
+  }
+  .opt-end-input:focus { border-color: var(--accent); }
+
+  .opt-order { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .opt-order-item { display: flex; align-items: center; gap: .625rem; }
+  .opt-order-badge {
+    flex-shrink: 0; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+    background: var(--accent); color: #fff; border-radius: 50%; font-size: .6875rem; font-weight: 700;
+  }
+  .opt-order-badge.start { background: #059669; }
+  .opt-order-badge.end   { background: #dc2626; }
+  .opt-order-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .opt-order-label { font-size: .75rem; font-weight: 600; color: var(--text-3); }
+  .opt-order-addr  { font-size: .8125rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .opt-savings {
+    margin-top: .25rem; padding: .5rem .625rem; border-radius: .5rem; line-height: 1.5;
+    font-size: .75rem; color: var(--accent-text); background: var(--accent-bg);
+  }
+  .opt-savings strong { font-weight: 700; }
+  .opt-savings.neutral { color: var(--text-3); background: var(--subtle); }
 
   /* ── Mobile (iPhone 16 Pro: 402px, Pro Max: 440px) ───────────────────── */
   @media (max-width: 768px) {
@@ -1541,5 +2186,12 @@
       max-width: 90vw;
     }
     .btn-compare { font-size: .75rem; padding: .25rem .5rem; }
+
+    /* Optimizer: stack panel over map, expose mobile exit button */
+    .optimize-body { flex-direction: column; }
+    .opt-panel { width: 100%; max-height: 58%; border-right: none; border-bottom: 1px solid var(--border); }
+    .opt-map { min-height: 42vh; }
+    .opt-exit-mobile { display: flex; }
+    .opt-add-row input, .opt-end-input { font-size: 16px; }
   }
 </style>
