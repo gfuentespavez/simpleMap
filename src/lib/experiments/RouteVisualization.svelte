@@ -3,6 +3,7 @@
   import { loader } from '$lib/mapLoader.js';
   import { PUBLIC_GOOGLE_MAP_ID, PUBLIC_GOOGLE_MAPS_API_KEY } from '$env/static/public';
   import { theme } from '$lib/theme.svelte.js';
+  import { TOLL_VEHICLES, TOLL_CORRIDOR, computeTollsForPath } from '$lib/tollData.js';
 
   // ── Inputs ────────────────────────────────────────────────────────────────
   let origin      = $state('');
@@ -19,8 +20,27 @@
 
   let totalLitres = $derived(routeData && kmPerLitre > 0 ? routeData.totalDistanceKm / kmPerLitre : 0);
   let fuelCost    = $derived(totalLitres * fuelPriceCLP);
-  let tollCost    = $derived(routeData?.tollCostCLP ?? 0);
-  let totalCost   = $derived(fuelCost + tollCost);
+
+  // ── Peajes ────────────────────────────────────────────────────────────────
+  // Las tarifas vienen del dataset local (tollData.js): se cobran las plazas
+  // que la ruta realmente atraviesa, según el tipo de vehículo. manualToll
+  // permite sobrescribir el monto donde no hay datos.
+  let vehicleKey = $state('auto_camioneta');
+  let manualToll = $state('');       // '' = usar el valor automático
+
+  // Plazas atravesadas + total, recalculados al cambiar la ruta o el vehículo.
+  let tollMatch = $derived(
+    routeData ? computeTollsForPath(routeData.points, vehicleKey) : { matched: [], total: 0 }
+  );
+  let autoTollCLP = $derived(tollMatch.total);
+  let tollSource  = $derived(tollMatch.matched.length ? 'local' : null);
+
+  let tollCost = $derived.by(() => {
+    const m = parseFloat(manualToll);
+    if (manualToll !== '' && !Number.isNaN(m) && m >= 0) return m;
+    return autoTollCLP;
+  });
+  let totalCost = $derived(fuelCost + tollCost);
 
   // ── Animation state ───────────────────────────────────────────────────────
   // 'idle' | 'ready' | 'playing' | 'paused' | 'done'
@@ -63,6 +83,7 @@
   let bgLine        = null;
   let traveledLine  = null;
   let particle      = null;
+  let tollMarkers   = [];   // AdvancedMarkerElement[] de las plazas atravesadas
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -98,6 +119,25 @@
         0%,100% { box-shadow: 0 0 0 3px rgba(66,133,244,.3),  0 0 10px rgba(66,133,244,.4); }
         50%     { box-shadow: 0 0 0 10px rgba(66,133,244,.08), 0 0 24px rgba(66,133,244,.7); }
       }
+      .rv-toll-pin {
+        display: flex; align-items: center; gap: 5px;
+        padding: 3px 8px 3px 4px;
+        background: #f59e0b; color: #1f2937;
+        border: 2px solid #fff; border-radius: 999px;
+        font: 600 11px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0,0,0,.35);
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+      .rv-toll-pin::before {
+        content: '';
+        width: 10px; height: 10px; flex-shrink: 0;
+        background: #1f2937; border-radius: 50%;
+        box-shadow: inset 0 0 0 2px #f59e0b;
+      }
+      .rv-toll-fare { font-weight: 700; font-variant-numeric: tabular-nums; }
+      .rv-toll-name { font-weight: 500; opacity: .85; }
     `;
     document.head.appendChild(s);
   });
@@ -134,6 +174,7 @@
     bgLine = null;
     traveledLine = null;
     particle = null;
+    tollMarkers = [];
     // Null GPS overlay refs tied to old map
     gpsMarker = null;
     gpsLine = null;
@@ -157,7 +198,7 @@
     const fullPath = encoding.decodePath(routeData.encodedPolyline);
 
     bgLine = new Polyline({
-      path: fullPath, strokeColor: '#cbd5e1', strokeWeight: 6, strokeOpacity: 1, map,
+      path: fullPath, strokeColor: '#66BB6A', strokeWeight: 6, strokeOpacity: 1, map,
       zIndex: 1,
     });
 
@@ -174,6 +215,46 @@
     });
   }
 
+  // ── Marcadores de peaje ───────────────────────────────────────────────────
+  function clearTollMarkers() {
+    for (const m of tollMarkers) m.map = null;
+    tollMarkers = [];
+  }
+
+  // Dibuja una chapa en la coordenada de cada plaza atravesada. Se rehace al
+  // cambiar la ruta, el tipo de vehículo (cambia la tarifa mostrada) o el mapa
+  // (el tema reconstruye la instancia).
+  $effect(() => {
+    const m = map;
+    const plazas = tollMatch.matched;
+
+    clearTollMarkers();
+    if (!m || plazas.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      const { AdvancedMarkerElement } = await loader.importLibrary('marker');
+      if (cancelled || map !== m) return;
+      tollMarkers = plazas.map((p) => {
+        const el = document.createElement('div');
+        el.className = 'rv-toll-pin';
+        el.innerHTML =
+          `<span class="rv-toll-fare"></span><span class="rv-toll-name"></span>`;
+        el.querySelector('.rv-toll-fare').textContent = fmtCLP(p.fare);
+        el.querySelector('.rv-toll-name').textContent = p.nombre;
+        return new AdvancedMarkerElement({
+          map: m,
+          position: { lat: p.lat, lng: p.lng },
+          content: el,
+          title: `${p.nombre} · ${p.ruta} · ${fmtCLP(p.fare)}`,
+          zIndex: 8,
+        });
+      });
+    })();
+
+    return () => { cancelled = true; };
+  });
+
   // ── Calculate route ───────────────────────────────────────────────────────
   async function calculateRoute() {
     if (!origin.trim() || !destination.trim()) return;
@@ -182,6 +263,7 @@
     clearVis();
     routeData = null;
     animState = 'idle';
+    manualToll = '';
 
     try {
       const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
@@ -193,7 +275,6 @@
             'routes.distanceMeters',
             'routes.duration',
             'routes.polyline.encodedPolyline',
-            'routes.travelAdvisory.tollInfo.estimatedPrice',
             'routes.legs.steps.distanceMeters',
             'routes.legs.steps.staticDuration',
             'routes.legs.steps.polyline.encodedPolyline',
@@ -204,9 +285,6 @@
           destination: { address: destination.trim() },
           travelMode: 'DRIVE',
           computeAlternativeRoutes: false,
-          // Pide a la API el detalle de peajes para la ruta.
-          extraComputations: ['TOLLS'],
-          routeModifiers: { vehicleInfo: { emissionType: 'GASOLINE' } },
         }),
       });
 
@@ -230,7 +308,6 @@
         totalDurationS:  parseInt(route.duration ?? '0'),
         points,
         encodedPolyline: route.polyline.encodedPolyline,
-        tollCostCLP: parseTollPrice(route),
       };
 
       await renderRouteOverlays();
@@ -492,19 +569,8 @@
     if (bgLine)       { bgLine.setMap(null);       bgLine = null; }
     if (traveledLine) { traveledLine.setMap(null);  traveledLine = null; }
     if (particle)     { particle.map = null;        particle = null; }
+    clearTollMarkers();
     traveledPts = []; traveledIdx = 0;
-  }
-
-  // La API de Routes devuelve los peajes como una lista de montos (Money) en
-  // travelAdvisory.tollInfo.estimatedPrice. Sumamos units + nanos por moneda.
-  // Asumimos una única moneda (CLP en Chile).
-  function parseTollPrice(route) {
-    const prices = route.travelAdvisory?.tollInfo?.estimatedPrice;
-    if (!prices?.length) return 0;
-    return prices.reduce(
-      (sum, m) => sum + parseInt(m.units ?? '0') + (m.nanos ?? 0) / 1e9,
-      0
-    );
   }
 
   function handleKeydown(e) { if (e.key === 'Enter') calculateRoute(); }
@@ -577,7 +643,7 @@
 <div class="experiment">
   <header>
     <h2>Visualización de Ruta</h2>
-    <p>Partícula animada sobre la ruta con velocidad por segmento y contador de combustible en tiempo real.</p>
+    <p>Partícula animada sobre la ruta con velocidad por segmento y contador de combustible y peajes en tiempo real.</p>
   </header>
 
   <div class="body">
@@ -680,6 +746,19 @@
           <span>Precio <em>(CLP / L)</em></span>
           <input type="number" min="1" step="1" bind:value={fuelPriceCLP} />
         </label>
+        <div class="field">
+          <span>Vehículo <em>(tarifa de peaje)</em></span>
+          <div class="vehicle-opts">
+            {#each TOLL_VEHICLES as v (v.id)}
+              <button
+                type="button"
+                class="vehicle-btn"
+                class:active={vehicleKey === v.id}
+                onclick={() => vehicleKey = v.id}
+              >{v.label}</button>
+            {/each}
+          </div>
+        </div>
       </section>
 
       <!-- Route summary -->
@@ -705,6 +784,19 @@
             </div>
           </div>
 
+          <!-- Plazas de peaje atravesadas por la ruta -->
+          {#if tollMatch.matched.length > 0}
+            <ul class="toll-list">
+              {#each tollMatch.matched as plaza (plaza.id)}
+                <li class="toll-item">
+                  <span class="toll-name">{plaza.nombre}</span>
+                  <span class="toll-road">{plaza.ruta}</span>
+                  <span class="toll-fare">{fmtCLP(plaza.fare)}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
           <!-- Desglose de gastos: combustible + peajes = total -->
           <div class="cost-box">
             <div class="cost-row">
@@ -712,7 +804,10 @@
               <span class="cost-val">{fmtCLP(fuelCost)}</span>
             </div>
             <div class="cost-row">
-              <span class="cost-label">Peajes</span>
+              <span class="cost-label">
+                Peajes
+                {#if tollMatch.matched.length > 0}<em class="cost-note">{tollMatch.matched.length} plaza{tollMatch.matched.length !== 1 ? 's' : ''}</em>{/if}
+              </span>
               <span class="cost-val">{fmtCLP(tollCost)}</span>
             </div>
             <div class="cost-row cost-total">
@@ -720,6 +815,26 @@
               <span class="cost-val">{fmtCLP(totalCost)}</span>
             </div>
           </div>
+
+          <!-- Peaje manual / override del valor automático -->
+          <label class="field toll-field">
+            <span>
+              Peajes (CLP)
+              <em>{tollSource === 'local' ? '· auto · ' + TOLL_CORRIDOR.via : '· manual'}</em>
+            </span>
+            <input
+              type="number" min="0" step="100"
+              placeholder={autoTollCLP > 0 ? String(Math.round(autoTollCLP)) : '0'}
+              bind:value={manualToll}
+            />
+          </label>
+          <p class="toll-hint">
+            {#if tollSource === 'local'}
+              Tarifas troncales {TOLL_CORRIDOR.via} (vigentes desde {TOLL_CORRIDOR.vigenteDesde}). Edita el monto si conoces el valor exacto.
+            {:else}
+              Sin tarifas en el dataset para esta ruta. Ingresa el peaje manualmente.
+            {/if}
+          </p>
         </section>
 
         <!-- Playback controls -->
@@ -961,8 +1076,6 @@
     display: block; font-size: .875rem; font-weight: 600; color: var(--text);
     font-family: 'SF Mono', 'Fira Code', monospace;
   }
-  .s-value.accent { color: var(--accent-text); }
-
   /* Desglose de gastos (combustible + peajes = total) */
   .cost-box {
     margin-top: .125rem; padding: .625rem .75rem;
@@ -980,6 +1093,37 @@
   }
   .cost-total .cost-label { font-size: .875rem; font-weight: 600; color: var(--text); }
   .cost-total .cost-val { font-size: 1rem; color: var(--accent-text); }
+
+  .toll-field { margin-top: .125rem; }
+  .toll-hint { margin: -.25rem 0 0; font-size: .6875rem; color: var(--text-4); line-height: 1.45; }
+  .cost-note { font-style: normal; font-weight: 400; font-size: .6875rem; color: var(--text-4); }
+
+  /* Vehicle (toll tariff) selector */
+  .vehicle-opts { display: flex; gap: 4px; }
+  .vehicle-btn {
+    flex: 1; padding: .375rem .5rem; background: var(--hover); color: var(--text-3);
+    border: 1px solid var(--border); border-radius: .375rem;
+    font-size: .75rem; font-weight: 500; cursor: pointer; transition: all .1s;
+  }
+  .vehicle-btn:hover { background: var(--border); }
+  .vehicle-btn.active {
+    background: var(--accent-bg); color: var(--accent-text);
+    border-color: var(--accent-border); font-weight: 600;
+  }
+
+  /* Plazas de peaje atravesadas */
+  .toll-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .toll-item {
+    display: flex; align-items: baseline; gap: .5rem;
+    padding: .375rem .5rem; background: var(--subtle);
+    border: 1px solid var(--border-2); border-radius: .375rem;
+  }
+  .toll-name { font-size: .8125rem; font-weight: 600; color: var(--text); flex-shrink: 0; }
+  .toll-road { flex: 1; min-width: 0; font-size: .6875rem; color: var(--text-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .toll-fare {
+    font-size: .8125rem; font-weight: 600; color: var(--text-2);
+    font-family: 'SF Mono', 'Fira Code', monospace; flex-shrink: 0;
+  }
 
   .play-row { display: flex; gap: .5rem; }
   .btn-play {
